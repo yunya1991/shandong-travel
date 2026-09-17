@@ -1,0 +1,1 @@
+{"ts": 1789630489.5216777, "iso": "2026-09-17T07:34:49+0000", "type": "cockpit.edit", "payload": {"suggestion_id": "sug_1789630488866_84bcc2", "new_diff": [{"op": "SWAP", "day": 1, "target_field": "attractions", "old_item": {"name": "济南市博物馆"}, "new_item": {"name": "大明湖", "source_url": "https://example.com/daming"}}]}}

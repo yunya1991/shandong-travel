@@ -310,3 +310,301 @@ async def broadcast_diff(plan_id: str, diff_payload: Dict[str, Any]) -> None:
             dead.append(ws)
     for ws in dead:
         subs.remove(ws)
+
+
+# ====== Task 22: DSH Web UI 驾驶舱（人机协同，AC-15 / FR-30 / NFR-12） ======
+# 待采纳建议池：plan_id -> [suggestion_id, ...]
+# 每条 suggestion: {suggestion_id, plan_id, session_id, diff, reason, source_url,
+#                    monitor_data, created_ts, status: 'pending'|'adopted'|'rejected'|'edited'}
+_pending_suggestions: Dict[str, list] = {}
+
+
+def _new_suggestion_id() -> str:
+    import uuid as _u
+    return f"sug_{int(time.time()*1000)}_{_u.uuid4().hex[:6]}"
+
+
+def _add_suggestion(plan_id: str, suggestion: Dict[str, Any]) -> str:
+    sid = _new_suggestion_id()
+    suggestion["suggestion_id"] = sid
+    suggestion["plan_id"] = plan_id
+    suggestion["created_ts"] = time.time()
+    suggestion["status"] = "pending"
+    _pending_suggestions.setdefault(plan_id, []).append(suggestion)
+    return sid
+
+
+def _find_suggestion(plan_id: str, suggestion_id: str) -> Optional[Dict[str, Any]]:
+    for s in _pending_suggestions.get(plan_id, []):
+        if s["suggestion_id"] == suggestion_id:
+            return s
+    return None
+
+
+@router.get("/plan/{plan_id}/suggestions")
+async def list_suggestions(plan_id: str, status: Optional[str] = None):
+    """列出某 plan 的待推送 / 已采纳 / 已驳回建议（驾驶舱用，TR-22.1）。"""
+    items = _pending_suggestions.get(plan_id, [])
+    if status:
+        items = [s for s in items if s.get("status") == status]
+    return JSONResponse({
+        "plan_id": plan_id,
+        "count": len(items),
+        "suggestions": [
+            {
+                "suggestion_id": s["suggestion_id"],
+                "plan_id": s["plan_id"],
+                "session_id": s.get("session_id", ""),
+                "diff": s.get("diff", []),
+                "reason": s.get("reason", ""),
+                "source_url": s.get("source_url", ""),
+                "created_ts": s.get("created_ts"),
+                "status": s.get("status", "pending"),
+            } for s in items
+        ],
+    })
+
+
+@router.post("/plan/{plan_id}/suggestions/seed")
+async def seed_suggestions(plan_id: str, request: Request):
+    """手动往驾驶舱塞一条 mock diff 建议（无 LLM 时演示用）。
+
+    body: {diff: [...], reason, source_url, session_id?}
+    """
+    body = await request.json()
+    diff = body.get("diff") or []
+    if not diff:
+        raise HTTPException(status_code=400, detail="diff required")
+    sid = _add_suggestion(plan_id, {
+        "diff": diff,
+        "reason": body.get("reason", "manual_seed"),
+        "source_url": body.get("source_url", ""),
+        "session_id": body.get("session_id", ""),
+        "monitor_data": body.get("monitor_data"),
+    })
+    return JSONResponse({"status": "seeded", "suggestion_id": sid, "plan_id": plan_id})
+
+
+@router.post("/plan/{plan_id}/suggestions/{suggestion_id}/adopt")
+async def adopt_suggestion(plan_id: str, suggestion_id: str):
+    """采纳建议：应用 diff → 保存新版本 → 广播给前端 WebSocket（TR-22.2）。
+
+    优化（Task 22+）：若建议由 monitor 自动产出且未被编辑过
+    （status='pending' 且 pending_version_id 存在），直接将该 pending 版本
+    升级为 adopted，避免重复 apply_diff 与生成重复版本。
+    否则（manual seed / edited / pending_version_id 已失效）走标准 apply_diff 路径。
+    """
+    sug = _find_suggestion(plan_id, suggestion_id)
+    if not sug:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    if sug.get("status") not in ("pending", "edited"):
+        raise HTTPException(status_code=409, detail=f"suggestion already {sug.get('status')}")
+
+    pending_vid = sug.get("pending_version_id")
+    # 仅 pending 状态 + 有 pending 版本 + 版本确实存在时复用
+    reuse_pending = False
+    if sug.get("status") == "pending" and pending_vid:
+        existing_v = plan_store.get_version(pending_vid)
+        if existing_v and existing_v.get("plan_id") == plan_id:
+            reuse_pending = True
+
+    if reuse_pending:
+        # 复用：升级 pending 版本为 adopted，同 plan 其他版本降级
+        ok = plan_store.mark_adopted(plan_id, pending_vid)
+        if not ok:
+            raise HTTPException(status_code=500, detail="mark_adopted failed")
+        new_vid = pending_vid
+        new_plan = plan_store.get_version(new_vid)["plan"]
+        parent_vid = existing_v.get("parent_version_id")
+        reuse_note = "reused_pending_version"
+    else:
+        # 标准流程：apply_diff + save_version
+        vid = plan_store.latest_version_id(plan_id)
+        if not vid:
+            raise HTTPException(status_code=404, detail="plan has no adopted version")
+        cur_plan = plan_store.get_version(vid)["plan"]
+        from . import dsh_runner
+        new_plan = dsh_runner.apply_diff(cur_plan, sug["diff"])
+        new_vid = plan_store.save_version(
+            plan_id, new_plan,
+            parent_version_id=vid,
+            trigger_reason=f"cockpit_adopt_{suggestion_id}",
+            diff=sug["diff"],
+            adopted=True,
+        )
+        parent_vid = vid
+        reuse_note = "fresh_apply_diff"
+
+    # 同步 monitor 快照
+    monitor.update_plan_snapshot(plan_id, new_plan)
+    # 标记 suggestion
+    sug["status"] = "adopted"
+    sug["adopted_version_id"] = new_vid
+    sug["adopted_ts"] = time.time()
+
+    # 广播给前端 WebSocket（≤ 1 秒内同步）
+    diff_payload = {
+        "type": "optimize_diff",
+        "plan_id": plan_id,
+        "suggestion_id": suggestion_id,
+        "diff": sug["diff"],
+        "new_version_id": new_vid,
+        "applied_count": len(sug["diff"]),
+        "reason": sug.get("reason", "cockpit_adopt"),
+        "source_url": sug.get("source_url", ""),
+        "explanation": sug.get("reason", ""),
+        "origin": "cockpit",
+    }
+    await broadcast_diff(plan_id, diff_payload)
+    # 同时通知前端清理 pending 徽章（Task 22+：待审计数归零）
+    await broadcast_diff(plan_id, {
+        "type": "optimize_suggestion_resolved",
+        "plan_id": plan_id,
+        "suggestion_id": suggestion_id,
+        "action": "adopted",
+        "new_version_id": new_vid,
+    })
+    # 记录 traj
+    sess = sug.get("session_id") or traj.new_session_id()
+    traj.append(sess, "cockpit.adopt", {
+        "suggestion_id": suggestion_id, "new_version_id": new_vid,
+        "diff": sug["diff"],
+        "reuse": reuse_note,
+        "parent_version_id": parent_vid,
+    })
+    return JSONResponse({
+        "status": "adopted", "suggestion_id": suggestion_id,
+        "plan_id": plan_id, "new_version_id": new_vid,
+        "plan": new_plan,
+        "reuse": reuse_note,
+    })
+
+
+@router.post("/plan/{plan_id}/suggestions/{suggestion_id}/reject")
+async def reject_suggestion(plan_id: str, suggestion_id: str):
+    """驳回建议：不应用 diff，不推送 diff（TR-22.2）；但通知前端清理 pending 徽章。"""
+    sug = _find_suggestion(plan_id, suggestion_id)
+    if not sug:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    if sug.get("status") not in ("pending", "edited"):
+        raise HTTPException(status_code=409, detail=f"suggestion already {sug.get('status')}")
+    # 若有 pending_version_id，把它的 adopted=0 显式清理（已是 0，做幂等处理）
+    pending_vid = sug.get("pending_version_id")
+    if pending_vid:
+        from . import plan_store as _ps
+        _ps.demote_version(pending_vid)  # 确保驳回后该版本不被 latest_version_id 返回
+    sug["status"] = "rejected"
+    sug["rejected_ts"] = time.time()
+    sess = sug.get("session_id") or traj.new_session_id()
+    traj.append(sess, "cockpit.reject", {"suggestion_id": suggestion_id})
+    # 通知前端清理 pending 徽章（Task 22+）
+    await broadcast_diff(plan_id, {
+        "type": "optimize_suggestion_resolved",
+        "plan_id": plan_id,
+        "suggestion_id": suggestion_id,
+        "action": "rejected",
+    })
+    return JSONResponse({
+        "status": "rejected", "suggestion_id": suggestion_id, "plan_id": plan_id,
+    })
+
+
+@router.post("/plan/{plan_id}/suggestions/{suggestion_id}/edit")
+async def edit_suggestion(plan_id: str, suggestion_id: str, request: Request):
+    """编辑建议 diff 后保留为 pending，等待用户在驾驶舱再点采纳（TR-22.3）。
+
+    body: {diff?: [...], reason?: str, source_url?: str}
+    """
+    sug = _find_suggestion(plan_id, suggestion_id)
+    if not sug:
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    if sug.get("status") not in ("pending", "edited"):
+        raise HTTPException(status_code=409, detail=f"suggestion already {sug.get('status')}")
+    body = await request.json()
+    if body.get("diff"):
+        sug["diff"] = body["diff"]
+    if body.get("reason"):
+        sug["reason"] = body["reason"]
+    if body.get("source_url") is not None:
+        sug["source_url"] = body["source_url"]
+    sug["status"] = "edited"
+    sug["edited_ts"] = time.time()
+    sess = sug.get("session_id") or traj.new_session_id()
+    traj.append(sess, "cockpit.edit", {
+        "suggestion_id": suggestion_id, "new_diff": sug["diff"],
+    })
+    return JSONResponse({
+        "status": "edited", "suggestion_id": suggestion_id,
+        "plan_id": plan_id, "diff": sug["diff"], "reason": sug["reason"],
+    })
+
+
+@router.get("/plan/{plan_id}/cockpit/state")
+async def cockpit_state(plan_id: str):
+    """驾驶舱聚合视图：思考轨迹 + 待采纳建议 + 阈值配置（TR-22.1 三视图）。
+
+    active_suggestions 包含 pending 与 edited 状态（驾驶舱可继续采纳/编辑）；
+    pending_suggestions 仅 pending（向后兼容字段，前端老逻辑可能仍读它）。
+    """
+    # 最新 session_id（plan_id 关联）
+    plan_row = None
+    with plan_store._conn() as c:
+        row = c.execute(
+            "SELECT * FROM plans WHERE plan_id=?", (plan_id,)
+        ).fetchone()
+        plan_row = dict(row) if row else None
+    session_id = plan_row["session_id"] if plan_row else ""
+    events = traj.read(session_id) if session_id else []
+    suggestions = _pending_suggestions.get(plan_id, [])
+    vid = plan_store.latest_version_id(plan_id)
+    # 阈值配置（与前端 config.js 共享 schema，仅返回后端可感知部分）
+    cfg = {
+        "dynamic_enabled": os.environ.get("TG_DYNAMIC_ENABLED", "true").lower() in ("true", "1", "yes"),
+        "dynamic_mode": os.environ.get("TG_DYNAMIC_MODE", "suggest"),
+        "dynamic_whitelist": [
+            w.strip() for w in os.environ.get(
+                "TG_DYNAMIC_WHITELIST", "attractions,food"
+            ).split(",") if w.strip()
+        ],
+        "monitor_interval_pre_24h_sec": 1800,
+        "monitor_interval_pre_sec": 7200,
+    }
+    active = [s for s in suggestions if s.get("status") in ("pending", "edited")]
+    return JSONResponse({
+        "plan_id": plan_id,
+        "session_id": session_id,
+        "current_version_id": vid,
+        "trajectory_events": events,
+        "trajectory_count": len(events),
+        # 兼容字段：老逻辑只看 pending_suggestions
+        "pending_suggestions": [s for s in active if s.get("status") == "pending"],
+        # 新字段：包含 pending + edited，供驾驶舱渲染「待审」面板
+        "active_suggestions": active,
+        "all_suggestions": suggestions,
+        "threshold_config": cfg,
+    })
+
+
+@router.post("/plan/{plan_id}/cockpit/config")
+async def cockpit_update_config(plan_id: str, request: Request):
+    """驾驶舱修改阈值配置（v1 写入环境变量，进程级生效；不持久化到 .env）。
+
+    body: {dynamic_enabled?, dynamic_mode?, dynamic_whitelist?}
+    """
+    body = await request.json()
+    if "dynamic_enabled" in body:
+        os.environ["TG_DYNAMIC_ENABLED"] = "true" if body["dynamic_enabled"] else "false"
+    if "dynamic_mode" in body:
+        os.environ["TG_DYNAMIC_MODE"] = body["dynamic_mode"]
+    if "dynamic_whitelist" in body:
+        os.environ["TG_DYNAMIC_WHITELIST"] = ",".join(body["dynamic_whitelist"])
+    return JSONResponse({
+        "status": "updated", "plan_id": plan_id,
+        "dynamic_enabled": os.environ.get("TG_DYNAMIC_ENABLED", "true"),
+        "dynamic_mode": os.environ.get("TG_DYNAMIC_MODE", "suggest"),
+        "dynamic_whitelist": [
+            w.strip() for w in os.environ.get(
+                "TG_DYNAMIC_WHITELIST", "attractions,food"
+            ).split(",") if w.strip()
+        ],
+    })

@@ -180,11 +180,22 @@ async def _maybe_optimize(
     meta: Dict[str, Any],
     session_id: Optional[str],
 ) -> None:
-    """跑 optimizer，diff 非空时广播 + 更新快照。"""
+    """跑 optimizer，diff 非空时按模式分流（Task 22）。
+
+    - 自动模式（dynamic_mode='auto'）：直接应用 + 广播 diff 给前端
+    - 建议模式（dynamic_mode='suggest'）：暂存到 _pending_suggestions，
+      等待 DSH Web UI 驾驶舱用户「采纳/驳回/编辑」（AC-15 / FR-30 / FR-31）
+    """
     from . import dsh_runner
-    from .routes import broadcast_diff  # 避免循环导入：运行时解析
+    from .routes import broadcast_diff, _add_suggestion  # 运行时解析
+    import os as _os
     llm = meta.get("llm_cfg") or {}
     plan = meta.get("plan") or {}
+    # 取当前模式（与 cockpit 共享环境变量）
+    mode = _os.environ.get("TG_DYNAMIC_MODE", "suggest")
+    dynamic_enabled = _os.environ.get("TG_DYNAMIC_ENABLED", "true").lower() in ("true", "1", "yes")
+    if not dynamic_enabled:
+        return  # 总开关关闭：跳过本次优化（TR-21.4 等价行为）
     try:
         result = await dsh_runner.optimize_with_monitor_data(
             plan_id, plan, monitor_data,
@@ -194,17 +205,65 @@ async def _maybe_optimize(
             whitelist=meta.get("whitelist"),
             session_id=session_id,
         )
-        if result.get("applied_count", 0) > 0:
-            # 更新快照，下一次监测基于新版本
+        if result.get("applied_count", 0) == 0:
+            return
+        diff = result.get("diff", [])
+        reason = "monitor_optimize"
+        # 取第一条 diff 的 source_url 做说明（若有）
+        source_url = ""
+        for d in diff:
+            ni = d.get("new_item") or {}
+            if isinstance(ni, dict) and ni.get("source_url"):
+                source_url = ni["source_url"]
+                break
+        if mode == "auto":
+            # 自动模式：直接应用，更新快照 + 广播
             meta["plan"] = result["plan"]
-            # 广播 diff 给前端（type=optimize_diff）
             await broadcast_diff(plan_id, {
                 "type": "optimize_diff",
                 "plan_id": plan_id,
-                "diff": result["diff"],
+                "diff": diff,
                 "new_version_id": result.get("new_version_id"),
                 "applied_count": result["applied_count"],
-                "reason": "monitor_optimize",
+                "reason": reason,
+                "source_url": source_url,
+                "origin": "monitor_auto",
+            })
+        else:
+            # 建议模式：暂存到驾驶舱 pending 池，不直接应用 diff
+            # monitor 已 save_version(adopted=True)，现在降级为 adopted=False，
+            # 使 latest_version_id 仍返回原 adopted 版本（不阻塞用户回滚到原版本）。
+            # cockpit 采纳时会通过 mark_adopted 升级回 adopted=True（Task 22+ 优化）。
+            from . import plan_store as _ps
+            new_vid = result.get("new_version_id")
+            if new_vid:
+                _ps.demote_version(new_vid)
+            sid = _add_suggestion(plan_id, {
+                "diff": diff,
+                "reason": reason,
+                "source_url": source_url,
+                "session_id": session_id or "",
+                "monitor_data": {
+                    "ts": monitor_data.get("ts"),
+                    "weather_days": (monitor_data.get("weather") or {}).get("days", [])[:3],
+                    "hotlist_count": monitor_data.get("hotlist_count", 0),
+                },
+                "pending_version_id": new_vid,
+            })
+            traj.append(session_id or traj.new_session_id(),
+                        "cockpit.suggestion_seeded", {
+                "suggestion_id": sid, "diff_count": len(diff),
+                "reason": reason,
+            })
+            # 广播一条 "建议待审" 通知给前端（前端可选展示"驾驶舱有 N 条待审建议" 提示）
+            await broadcast_diff(plan_id, {
+                "type": "optimize_suggestion_pending",
+                "plan_id": plan_id,
+                "suggestion_id": sid,
+                "diff_count": len(diff),
+                "reason": reason,
+                "source_url": source_url,
+                "origin": "monitor_suggest",
             })
     except Exception as e:
         if session_id:

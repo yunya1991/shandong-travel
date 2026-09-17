@@ -889,3 +889,24 @@ strong { color: var(--accent); font-weight: 600; }
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* 待审建议徽章（Task 22+：建议模式下显示驾驶舱 pending 数量） */
+.badge--dyn-pending {
+  background: var(--warning, #FAAD14);
+  color: #fff;
+  cursor: pointer;
+  text-decoration: none;
+  transition: filter 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.badge--dyn-pending:hover { filter: brightness(0.92); }
+.badge--dyn-pending.is-empty { display: none; }
+.badge--dyn-pending__count {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}

@@ -13,6 +13,9 @@ const DEFAULT_CONFIG = {
   dynamic_enabled: false,    // 总开关
   dynamic_mode: 'suggest',   // 'suggest'（建议模式，需手动采纳）| 'auto'（自动应用，可撤销）
   dynamic_whitelist: ['attractions', 'food'],  // 允许动态替换的卡片类型
+  // DSH Web UI 驾驶舱（Task 22 / AC-15 / NFR-12）：默认仅本机访问
+  cockpit_host: '127.0.0.1',
+  cockpit_port: 3080,
 };
 
 export function loadConfig() {
@@ -107,6 +110,15 @@ function renderSettings(container) {
           <label><input type="checkbox" class="cfg-dyn-wl" value="accommodation" ${cfg.dynamic_whitelist.includes('accommodation') ? 'checked' : ''}> 住宿</label>
         </div>
       </div>
+      <div class="form-group">
+        <label class="form-label">DSH Web UI 驾驶舱地址（Task 22 / AC-15）</label>
+        <div style="display:flex;gap:var(--space-3);align-items:center;">
+          <input class="form-input" id="cfg-cockpit-host" value="${escapeHtml(cfg.cockpit_host)}" placeholder="127.0.0.1" style="flex:1;">
+          <span style="color:var(--page-text-muted);">:</span>
+          <input class="form-input" id="cfg-cockpit-port" type="number" min="1" max="65535" value="${cfg.cockpit_port}" style="width:100px;">
+        </div>
+        <p style="color:var(--page-text-muted);font-size:0.78rem;margin-top:4px;">建议模式下，待审徽章会指向此地址。默认仅本机访问（NFR-12）。</p>
+      </div>
     </div>
     <div class="settings-section">
       <h3>使用说明</h3>
@@ -133,6 +145,8 @@ function renderSettings(container) {
       dynamic_enabled: container.querySelector('#cfg-dyn-enabled').checked,
       dynamic_mode: container.querySelector('#cfg-dyn-mode').value,
       dynamic_whitelist: whitelist,
+      cockpit_host: container.querySelector('#cfg-cockpit-host')?.value.trim() || '127.0.0.1',
+      cockpit_port: parseInt(container.querySelector('#cfg-cockpit-port')?.value, 10) || 3080,
     };
     saveConfig(config);
     const result = container.querySelector('#cfg-test-result');

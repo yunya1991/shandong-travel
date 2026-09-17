@@ -255,6 +255,58 @@ DSH 是预发布 SDK（`deepseek-harness-sdk==0.1.5rc1`），存在以下风险�
 
 ---
 
+## DSH Web UI 驾驶舱（Task 22 / AC-15）
+
+人机协同驾驶舱，让用户实时看到 Agent 的思考、决定是否采纳动态变更建议。
+
+### 启动
+
+`bash server/run.sh` 会同时启动：
+
+- **FastAPI 主后端**：`http://0.0.0.0:8000`
+- **DSH Web UI 驾驶舱**：`http://127.0.0.1:3080`
+
+也可单独启动驾驶舱：
+
+```bash
+cd server && .venv/bin/python cockpit.py
+# 或带自定义参数
+TG_COCKPIT_HOST=127.0.0.1 TG_COCKPIT_PORT=3080 TG_BACKEND_URL=http://127.0.0.1:8000 \
+  .venv/bin/python cockpit.py
+```
+
+要禁用驾驶舱：`COCKPIT_DISABLE=1 bash server/run.sh`。
+
+### 访问与安全（NFR-12）
+
+- 驾驶舱默认仅监听 `127.0.0.1`，**不暴露公网**；
+- 默认 **无需登录**，便于本机调试；
+- **远程访问**：需在驾驶舱前置反向代理（如 nginx / Caddy）并叠加 Basic Auth / OAuth 鉴权，不要直接将 3080 端口暴露到公网。
+
+### 三类视图（TR-22.1）
+
+1. **思考轨迹**：复用 Task 19 的 Trajectory 接口，按时间线渲染 system_prompt → planner → scraper → integrator → validator → optimizer → monitor → cockpit 全链路事件
+2. **动态变更建议列表**：列出 `tg-optimizer` 待推送的 diff，每条带「采纳 / 驳回 / 编辑」按钮（建议模式）
+3. **阈值配置面板**：动态优化总开关、应用模式（建议 / 自动）、元素白名单（景点 / 美食 / 住宿）、监测频率
+
+### 双向同步
+
+- **采纳建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/adopt` → 应用 diff → 保存新版本 → 通过 WebSocket 广播给前端，前端 ≤ 1 秒内同步更新（TR-22.2）
+- **驳回建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/reject` → 不应用 diff、不推送前端（TR-22.2）
+- **编辑建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/edit` → 修改 diff 后保留为 pending，等待用户在驾驶舱再点采纳（TR-22.3）
+
+### 与前端状态对齐
+
+- 两边共享同一 `plan_id` 与 `version_id`，避免出现"驾驶舱已采纳但前端未更新"或反之
+- 驾驶舱采纳产生的 `version_id` 会通过 WebSocket payload 推送，前端在 `optimizer.js` 中接收并应用
+- 建议模式（`TG_DYNAMIC_MODE=suggest`）下，monitor 产出的 diff 会暂存到驾驶舱 pending 池，不直接应用；自动模式（`TG_DYNAMIC_MODE=auto`）下，diff 直接推送前端
+
+### 手动塞 mock 建议（演示用）
+
+无 LLM 时也可演示驾驶舱流程：在驾驶舱「动态变更建议」面板底部有"手动塞 mock diff"输入框，填入 JSON diff 后点"塞入驾驶舱"即可。
+
+---
+
 ## Creator 模式工作流
 
 本应用面向两类用户：
@@ -372,7 +424,7 @@ workspace/
 | Trajectory 调试视图 + 重放 | ✗ | ✓ | AC-12 |
 | 插件热重载（自进化） | ✗ | △（未实现） | AC-13 |
 | 动态优化引擎（天气/热榜） | ✗ | ✓ | AC-14 |
-| DSH Web UI 驾驶舱 | ✗ | △（未实现） | AC-15 |
+| DSH Web UI 驾驶舱 | ✗ | ✓ | AC-15 |
 | 多人实时协作编辑 | ✗ | △（WebSocket 已通） | AC-14 |
 
 ✓ 已实现 / △ 部分实现 / ✗ 不可用

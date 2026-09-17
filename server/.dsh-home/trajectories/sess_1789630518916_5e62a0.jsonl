@@ -1,0 +1,1 @@
+{"ts": 1789630518.9167354, "iso": "2026-09-17T07:35:18+0000", "type": "cockpit.adopt", "payload": {"suggestion_id": "sug_1789630518856_26164e", "new_version_id": "ver_1789630518913_eb74cb", "diff": [{"op": "ADD", "day": 1, "target_field": "attractions", "new_item": {"name": "WS测试", "source_url": "https://example.com/ws"}}]}}

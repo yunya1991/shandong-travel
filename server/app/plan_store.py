@@ -80,6 +80,13 @@ def save_version(
     diff: Optional[List[Dict[str, Any]]] = None,
     adopted: bool = True,
 ) -> str:
+    """保存版本快照。
+
+    注意：本函数不自动 demote 同 plan 的其他 adopted 版本。
+    `latest_version_id` 用 `ORDER BY ts DESC LIMIT 1` 取最新，
+    多个 adopted 共存时以时间戳最新者为「当前 adopted」（FR-32 一致性）。
+    若需把某 pending 版本升级为 adopted 并 demote 其他，用 `mark_adopted`。
+    """
     version_id = new_version_id()
     with _conn() as c:
         c.execute(
@@ -128,3 +135,48 @@ def latest_version_id(plan_id: str) -> Optional[str]:
             (plan_id,),
         ).fetchone()
     return row["version_id"] if row else None
+
+
+def mark_adopted(plan_id: str, version_id: str) -> bool:
+    """把指定版本标记为 adopted，同 plan 的其他版本降级为非 adopted。
+
+    用于 cockpit adopt 时复用 monitor 已生成的 pending 版本（Task 22+）。
+    返回是否成功（version_id 必须存在且属于该 plan）。
+    """
+    with _conn() as c:
+        row = c.execute(
+            "SELECT version_id FROM plan_versions WHERE version_id=? AND plan_id=?",
+            (version_id, plan_id),
+        ).fetchone()
+        if not row:
+            return False
+        c.execute(
+            "UPDATE plan_versions SET adopted=0 WHERE plan_id=?",
+            (plan_id,),
+        )
+        c.execute(
+            "UPDATE plan_versions SET adopted=1 WHERE version_id=?",
+            (version_id,),
+        )
+    return True
+
+
+def demote_version(version_id: str) -> bool:
+    """把指定版本设为非 adopted（建议模式下 monitor 产出的 pending 版本降级用）。
+
+    与 mark_adopted 不同：本函数仅修改单条，不动其他版本；
+    用于 monitor 建议模式：刚 save_version 的 adopted=True 改为 adopted=False，
+    使 latest_version_id 仍返回原 adopted 版本（避免阻塞用户回滚到原版本）。
+    """
+    with _conn() as c:
+        row = c.execute(
+            "SELECT version_id FROM plan_versions WHERE version_id=?",
+            (version_id,),
+        ).fetchone()
+        if not row:
+            return False
+        c.execute(
+            "UPDATE plan_versions SET adopted=0 WHERE version_id=?",
+            (version_id,),
+        )
+    return True
