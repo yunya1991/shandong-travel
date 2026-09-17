@@ -2,32 +2,47 @@
 import { generatePlan } from './llm.js';
 import { makePlanId } from './schema.js';
 
-const STORE_KEY = 'tg_current_plan';
+const STORE_KEY = 'tg_current_result';
 
-let currentPlan = null;
-let currentPlanId = null;
+// 当前完整结果（包含 plan + sources + warnings + session_id + backend_used + degraded）
+let currentResult = null;
 
 export function getCurrentPlan() {
-  return currentPlan;
+  return currentResult?.plan || null;
 }
 
 export function getCurrentPlanId() {
-  return currentPlanId;
+  return currentResult?.planId || null;
+}
+
+export function getCurrentResult() {
+  return currentResult;
+}
+
+export function setCurrentResult(result) {
+  currentResult = result;
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(result));
+  } catch {}
 }
 
 export function setCurrentPlan(plan, planId) {
-  currentPlan = plan;
-  currentPlanId = planId;
-  localStorage.setItem(STORE_KEY, JSON.stringify({ plan, planId }));
+  // 兼容老接口：仅设置 plan，保留其他字段
+  currentResult = {
+    ...(currentResult || {}),
+    plan,
+    planId,
+  };
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(currentResult));
+  } catch {}
 }
 
 // 启动时恢复
 try {
   const raw = localStorage.getItem(STORE_KEY);
   if (raw) {
-    const { plan, planId } = JSON.parse(raw);
-    currentPlan = plan;
-    currentPlanId = planId;
+    currentResult = JSON.parse(raw);
   }
 } catch {}
 
@@ -56,9 +71,9 @@ export function initGenerate() {
     btn.innerHTML = '<span class="spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;margin:0;"></span> 生成中...';
 
     try {
-      const plan = await generatePlan(params);
+      const result = await generatePlan(params);
       const planId = makePlanId(params.dest, params.days);
-      setCurrentPlan(plan, planId);
+      setCurrentResult({ ...result, planId });
 
       // 切换到手册视图
       const { switchView } = await import('./main.js');

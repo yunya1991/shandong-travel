@@ -13,6 +13,7 @@ export function switchView(viewName) {
   if (viewName === 'budget') { import('./tools/budget.js').then(m => m.renderBudget()); }
   if (viewName === 'favorites') { import('./tools/favorites.js').then(m => m.renderFavorites()); }
   if (viewName === 'guide') { import('./renderer.js').then(m => m.renderCurrent()); }
+  if (viewName === 'debug') { import('./debug.js').then(m => m.renderDebug()); }
 }
 
 tabs.forEach(tab => {

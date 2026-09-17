@@ -1,5 +1,5 @@
 // 手册渲染器：将 plan 渲染为 8 大模块
-import { getCurrentPlan } from './generate.js';
+import { getCurrentPlan, getCurrentResult } from './generate.js';
 import { escapeHtml } from './config.js';
 import { fetchImages } from './images.js';
 import { getFavorites, toggleFavorite } from './tools/favorites.js';
@@ -8,6 +8,7 @@ import { getFavorites, toggleFavorite } from './tools/favorites.js';
  * 渲染当前方案到手册视图
  */
 export async function renderCurrent() {
+  const result = getCurrentResult();
   const plan = getCurrentPlan();
   const container = document.getElementById('guide-content');
   if (!plan) {
@@ -19,8 +20,8 @@ export async function renderCurrent() {
     return;
   }
 
-  // 先立即渲染（占位图），不阻塞内容展示
-  container.innerHTML = renderPlan(plan, new Map());
+  // 先立即渲染（占位图 + warnings + 来源），不阻塞内容展示
+  container.innerHTML = renderPlan(plan, new Map(), result);
   bindFavButtons(container, plan);
 
   // 异步加载图片，加载完成后更新 DOM
@@ -63,9 +64,10 @@ async function loadImagesAsync(plan, container) {
   });
 }
 
-function renderPlan(plan, imageMap) {
+function renderPlan(plan, imageMap, result) {
   return `
   <article class="guide">
+    ${renderWarningsBanner(result)}
     ${renderOverview(plan.overview)}
     ${renderRouteMap(plan.route)}
     ${renderDaily(plan.daily, imageMap)}
@@ -76,6 +78,52 @@ function renderPlan(plan, imageMap) {
     ${renderTips(plan.tips)}
     ${renderExportBar()}
   </article>`;
+}
+
+/**
+ * 顶部 banner：展示 session_id、来源数、warnings（AC-10 / AC-12）
+ */
+function renderWarningsBanner(result) {
+  if (!result) return '';
+  const warnings = result.warnings || [];
+  const sources = result.sources || [];
+  const sessionId = result.session_id || '';
+  const backendUsed = result.backend_used;
+  const degraded = result.degraded;
+
+  const warningItems = warnings.map(w => `
+    <li class="warning-item warning-item--${escapeHtml(w.level || 'low')}">
+      <span class="warning-item__level">${escapeHtml((w.level || 'low').toUpperCase())}</span>
+      <span class="warning-item__field">${escapeHtml(w.field || '')}</span>
+      <span class="warning-item__msg">${escapeHtml(w.msg || '')}</span>
+    </li>`).join('');
+
+  const badge = backendUsed
+    ? `<span class="badge badge--backend">后端增强模式 · session: ${escapeHtml(sessionId.slice(0, 20))}</span>`
+    : (degraded ? `<span class="badge badge--degraded">已降级为纯前端模式</span>` : '');
+
+  return `
+  <aside class="guide-banner">
+    ${badge}
+    ${sources.length ? `<span class="badge badge--sources">来源 ${sources.length} 条</span>` : ''}
+    ${warnings.length ? `
+      <details class="warnings-callout">
+        <summary>校对提示 ${warnings.length} 条</summary>
+        <ul class="warning-list">${warningItems}</ul>
+      </details>` : ''}
+  </aside>`;
+}
+
+/**
+ * 卡片底部来源链接（AC-10）
+ */
+function renderSourceUrl(item) {
+  if (!item || !item.source_url) return '';
+  const title = item.source_title || item.name || '来源';
+  const host = (() => {
+    try { return new URL(item.source_url).hostname; } catch { return ''; }
+  })();
+  return `<a class="source-link" href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener noopener" title="${escapeHtml(item.source_url)}">来源: ${escapeHtml(host || title)} ↗</a>`;
 }
 
 function renderOverview(o) {
@@ -152,11 +200,13 @@ function renderDaily(daily, imageMap) {
           ${a.duration ? `<span class="attraction-item__tag">${escapeHtml(a.duration)}</span>` : ''}
         </div>
         <div class="attraction-item__desc">${escapeHtml(a.desc)}</div>
+        ${renderSourceUrl(a)}
       </div>`).join('');
     const foods = (d.food || []).map(f => `
       <div class="food-item">
         <svg class="food-item__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11h18M5 11v8a2 2 0 002 2h10a2 2 0 002-2v-8M7 11V7a5 5 0 0110 0v4"/></svg>
         <div class="food-item__text"><strong>${escapeHtml(f.name)}</strong>：${escapeHtml(f.desc)}</div>
+        ${renderSourceUrl(f)}
       </div>`).join('');
     return `
     <div class="day-card">
@@ -203,6 +253,7 @@ function attractionCard(a, imageMap, type) {
       ${(a.tags || []).map(t => `<span class="attraction-item__tag">${escapeHtml(t)}</span>`).join('')}
     </div>
     <div class="attraction-item__desc">${escapeHtml(a.desc)}</div>
+    ${renderSourceUrl(a)}
   </div>`;
 }
 
@@ -227,6 +278,7 @@ function renderAccommodation(acc) {
       <div class="accommodation-item__area">${escapeHtml(a.area)}</div>
       <div class="accommodation-item__price">${escapeHtml(a.price_range)}</div>
       <div class="accommodation-item__desc">${escapeHtml(a.desc)}</div>
+      ${renderSourceUrl(a)}
     </div>`).join('');
   return `
   <section>
