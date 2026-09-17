@@ -292,18 +292,42 @@ TG_COCKPIT_HOST=127.0.0.1 TG_COCKPIT_PORT=3080 TG_BACKEND_URL=http://127.0.0.1:8
 ### 双向同步
 
 - **采纳建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/adopt` → 应用 diff → 保存新版本 → 通过 WebSocket 广播给前端，前端 ≤ 1 秒内同步更新（TR-22.2）
-- **驳回建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/reject` → 不应用 diff、不推送前端（TR-22.2）
-- **编辑建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/edit` → 修改 diff 后保留为 pending，等待用户在驾驶舱再点采纳（TR-22.3）
+  - 优化（Task 22+）：若建议由 monitor 自动产出且未被编辑过（status='pending' 且 pending_version_id 存在），直接将 monitor 已生成的 pending 版本升级为 adopted（通过 `plan_store.mark_adopted`），避免重复 apply_diff；edited 建议或 manual seed 仍走标准 apply_diff 路径
+  - 采纳后会同时广播 `optimize_diff`（应用变更）+ `optimize_suggestion_resolved`（通知前端清理"待审"徽章）
+- **驳回建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/reject` → 不应用 diff、不推送 diff；但会推送 `optimize_suggestion_resolved` 通知前端清理"待审"徽章，并把 pending 版本（若有）通过 `plan_store.demote_version` 确保降级
+- **编辑建议**：调 `POST /plan/{plan_id}/suggestions/{sid}/edit` → 修改 diff 后保留为 edited 状态，等待用户在驾驶舱再点采纳（TR-22.3）。edited 状态与 pending 一样可在 `active_suggestions` 字段中返回，并支持继续采纳/编辑
 
 ### 与前端状态对齐
 
 - 两边共享同一 `plan_id` 与 `version_id`，避免出现"驾驶舱已采纳但前端未更新"或反之
 - 驾驶舱采纳产生的 `version_id` 会通过 WebSocket payload 推送，前端在 `optimizer.js` 中接收并应用
 - 建议模式（`TG_DYNAMIC_MODE=suggest`）下，monitor 产出的 diff 会暂存到驾驶舱 pending 池，不直接应用；自动模式（`TG_DYNAMIC_MODE=auto`）下，diff 直接推送前端
+- 前端 banner 上「🛫 待审 N」徽章会指向 cockpit URL（可在设置中配置 host/port），点击直接跳转驾驶舱；徽章计数通过 WebSocket 实时刷新
+
+### 端点一览（Task 22+）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/plan/{plan_id}/cockpit/state` | 驾驶舱聚合视图：思考轨迹 + `active_suggestions`（pending + edited）+ `pending_suggestions`（兼容字段，仅 pending）+ `all_suggestions` + 阈值配置 |
+| POST | `/plan/{plan_id}/cockpit/config` | 修改 `dynamic_enabled` / `dynamic_mode` / `dynamic_whitelist`（进程级环境变量，不持久化） |
+| GET | `/plan/{plan_id}/suggestions?status=pending` | 列出建议（支持按 status 过滤） |
+| POST | `/plan/{plan_id}/suggestions/seed` | 手动塞 mock diff（演示用） |
+| POST | `/plan/{plan_id}/suggestions/{sid}/adopt` | 采纳建议：复用 pending_version_id 或 fresh apply_diff，广播 diff + resolved |
+| POST | `/plan/{plan_id}/suggestions/{sid}/reject` | 驳回建议：不应用 diff，demote pending 版本，广播 resolved |
+| POST | `/plan/{plan_id}/suggestions/{sid}/edit` | 编辑建议 diff：保留为 edited 状态，等待再采纳 |
 
 ### 手动塞 mock 建议（演示用）
 
 无 LLM 时也可演示驾驶舱流程：在驾驶舱「动态变更建议」面板底部有"手动塞 mock diff"输入框，填入 JSON diff 后点"塞入驾驶舱"即可。
+
+### 跑端到端测试
+
+```bash
+cd server
+.venv/bin/python -m tests.test_cockpit_e2e
+```
+
+覆盖 TR-22.1 / TR-22.2 / TR-22.3 + Task 22+ 完善（pending+edited 状态、adopt 复用 pending_version_id、reject 通知、auto/suggest 模式分流、dynamic_enabled=false 跳过）。
 
 ---
 
