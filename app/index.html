@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>旅游手册生成器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="app-nav">
+    <div class="app-nav__inner">
+      <div class="app-nav__brand">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        旅游手册生成器
+      </div>
+      <div class="app-nav__tabs">
+        <button class="app-nav__tab active" data-view="generate">生成手册</button>
+        <button class="app-nav__tab" data-view="guide">手册</button>
+        <button class="app-nav__tab" data-view="checklist">行前清单</button>
+        <button class="app-nav__tab" data-view="budget">预算</button>
+        <button class="app-nav__tab" data-view="favorites">收藏</button>
+        <button class="app-nav__tab" data-view="settings">设置</button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="app-main">
+    <!-- 生成视图 -->
+    <section id="view-generate" class="view active">
+      <div class="gen-card">
+        <h2>生成旅游手册</h2>
+        <p class="gen-card__sub">输入目的地与出行偏好，AI 将为你生成完整的旅游手册与管理工具。</p>
+        <form id="gen-form">
+          <div class="form-group">
+            <label class="form-label" for="dest">目的地 *</label>
+            <input class="form-input" id="dest" name="dest" placeholder="例如：济南、阿尔山、东京" required>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="days">天数</label>
+              <input class="form-input" id="days" name="days" type="number" min="1" max="30" value="5">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="travelers">出行人数</label>
+              <input class="form-input" id="travelers" name="travelers" type="number" min="1" max="20" value="2">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="departure">出发城市</label>
+              <input class="form-input" id="departure" name="departure" placeholder="例如：北京">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="season">出行季节</label>
+              <select class="form-select" id="season" name="season">
+                <option value="春">春季</option>
+                <option value="夏">夏季</option>
+                <option value="秋" selected>秋季</option>
+                <option value="冬">冬季</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="style">旅行风格（可多选，逗号分隔）</label>
+            <input class="form-input" id="style" name="style" placeholder="自然风光, 人文历史, 美食探店, 亲子, 自驾" value="自然风光, 人文历史, 美食探店">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="budget-level">预算档位</label>
+            <select class="form-select" id="budget-level" name="budget-level">
+              <option value="经济">经济（人均 ¥1000-3000）</option>
+              <option value="舒适" selected>舒适（人均 ¥3000-6000）</option>
+              <option value="豪华">豪华（人均 ¥6000+）</option>
+            </select>
+          </div>
+          <button type="submit" class="btn btn--primary" id="gen-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            生成手册
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- 手册视图 -->
+    <section id="view-guide" class="view">
+      <div id="guide-content"></div>
+    </section>
+
+    <!-- 清单视图 -->
+    <section id="view-checklist" class="view">
+      <div id="checklist-content"></div>
+    </section>
+
+    <!-- 预算视图 -->
+    <section id="view-budget" class="view">
+      <div id="budget-content"></div>
+    </section>
+
+    <!-- 收藏视图 -->
+    <section id="view-favorites" class="view">
+      <div id="favorites-content"></div>
+    </section>
+
+    <!-- 设置视图 -->
+    <section id="view-settings" class="view">
+      <div id="settings-content"></div>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    旅游手册生成器 · AI 生成内容仅供参考，请自行核实 · 图片来源 Wikimedia Commons
+  </footer>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
