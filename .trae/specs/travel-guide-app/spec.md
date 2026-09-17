@@ -1,8 +1,8 @@
 # 旅游手册生成器 · Product Requirements Document
 
 ## Overview
-- **Summary**: 一个混合架构的旅游手册生成应用（Travel Guide Generator）。前端为单页 Web 应用，后端为可选的 Python 服务（FastAPI + Scrapling）。用户输入目的地与偏好后，应用由 LLM 驱动 Scrapling 爬虫抓取真实旅游信息与物料（图文、价格、坐标等），再由 LLM 集成、校对并最终优化，输出包含行程概览、路线地图、每日安排、景点（含图片）、住宿、美食、预算、贴士的旅游手册，同时提供行前清单、预算追踪、行程编辑等交互式管理工具。
-- **Purpose**: 将"输入地名 → 自动产出旅游手册与管理工具"的流程自动化；通过"爬虫取材 + LLM 编排"的分工节省 token、提升内容真实度，让用户无需再逐字撰写攻略。
+- **Summary**: 一个混合架构的旅游手册生成应用（Travel Guide Generator）。前端为单页 Web 应用；后端为可选的 Python 服务，由 DeepSeek Harness（DSH，Cordis 全插件智能体框架）作为编排核心，把"拆任务 → Scrapling 抓取 → 集成 → 校对 → 优化"五个环节封装为可热替换的 Cordis 插件，再由 LLM 在 Harness 框架内"守规矩办事"。用户输入目的地与偏好后，DSH Agent 串行/并行调度各插件，输出包含行程概览、路线地图、每日安排、景点（含图片）、住宿、美食、预算、贴士的旅游手册，同时提供行前清单、预算追踪、行程编辑等交互式管理工具。
+- **Purpose**: 将"输入地名 → 自动产出旅游手册与管理工具"的流程自动化；通过"DSH 编排 + Scrapling 取材 + LLM 校对"三层分工节省 token、提升内容真实度；并通过 Trajectory 日志 + 插件热重载为后续自进化留出空间，让用户无需再逐字撰写攻略。
 - **Target Users**: 个人旅行者，尤其是喜欢提前规划、希望快速获得结构化攻略与行前管理工具的用户。
 
 ## Goals
@@ -13,6 +13,8 @@
 - G5: 生成结果可导出为静态 HTML 或长图，便于分享/打印。
 - G6: 通过 Scrapling 爬虫抓取真实旅游信息（景点描述、门票、价格、坐标、图片），降低对 LLM 长文本生成的依赖，节省 token 并提升内容真实性。
 - G7: LLM 在流水线中承担四类职责：①驱动爬虫（生成抓取任务）②集成结构化数据 ③校对验证 ④最终效果优化。
+- G8: 由 DeepSeek Harness（Cordis 全插件框架）承担编排，把"拆任务/抓取/集成/校对/优化/缓存"封装为可热替换的标准插件，LLM 在框架内通过工具调用与子 Agent 委派"守规矩办事"，避免硬编码 Agent 主循环。
+- G9: 通过 DSH Trajectory 日志与 Creator 模式为后续自进化（插件热替换、轨迹回放、策略迭代）留出接口；v1 仅做可观测与可回放，不强制上线自进化。
 
 ## Non-Goals
 - 不做用户登录/注册系统、不做云端同步。
@@ -49,29 +51,41 @@
 - **FR-12**: 支持将手册渲染为海报长图（复用 `travel-long-image.html` 的 414px 宽布局思路）并下载为 PNG。
 
 ### 爬虫取材与 LLM 编排（可选 Python 后端）
-- **FR-13**: 提供可选的 Python 后端服务（FastAPI），暴露 `/scrape`、`/generate`、`/health` 等 HTTP 接口；前端在设置面板可切换"纯前端模式"与"后端增强模式"，后端地址可配置。
-- **FR-14**: LLM 驱动爬虫：前端或后端将"目的地 + 偏好"交给 LLM，由 LLM 输出结构化抓取任务清单（target_url/source_type/query/fields），调用 Scrapling 抓取网络资源（Wikipedia/Wikivoyage/旅游站点/官方门票页等），返回原始素材 JSON。
-- **FR-15**: Scrapling 抓取层支持：自适应元素选择（auto-match）、反反爬（stealth 模式、headers 伪装、可选 Playwright 渲染）、并发抓取、失败重试与降级；对所有外站请求设置超时（≤15s）与并发上限（≤4）。
-- **FR-16**: LLM 集成与校对：将抓取到的素材与原始用户偏好合并，由 LLM 生成符合 schema 的方案 JSON；同时进行事实校对（名称拼写、价格区间合理性、坐标与城市匹配）并产出校对报告（warning 列表），前端可展示"内容来源 + 校对提示"。
-- **FR-17**: 数据计算/进化（可选）：对于预算分配、景点排序、路线时间分配等可量化目标，提供轻量算法模块（贪心/动态规划/简单的进化策略），输入 LLM 候选与抓取约束，输出优化后的方案；该模块仅在没有更简单的替代时启用，结果仍交 LLM 校对。
-- **FR-18**: 缓存层：对相同目的地的抓取结果与 LLM 生成结果做本地缓存（文件或 SQLite，TTL 默认 7 天），减少重复抓取与 LLM 调用。
+- **FR-13**: 提供可选的 Python 后端服务（FastAPI 薄壳 + DeepSeek Harness Agent），暴露 `/scrape`、`/generate`、`/health`、`/trajectory/{session_id}` 等 HTTP 接口；前端在设置面板可切换"纯前端模式"与"后端增强模式"，后端地址可配置。
+- **FR-14**: LLM 驱动爬虫（由 `tg-planner` 插件实现）：DSH Agent 接收"目的地 + 偏好"后调用 `tg-planner`，由 LLM 输出结构化抓取任务清单（target_url/source_type/query/fields），交由 `tg-scraper` 执行；整个调用走 Harness 工具协议，参数与结果进入 Trajectory 日志。
+- **FR-15**: Scrapling 抓取层（由 `tg-scraper` 插件实现）：封装 Scrapling 的 `StealthFetcher`/`PlayWrightFetcher`，支持自适应元素选择（auto-match）、反反爬、并发抓取、失败重试与降级；超时 ≤15s，全局并发 ≤4，单域名 ≤2，请求间最小间隔 500ms；遵守 `robots.txt`。
+- **FR-16**: LLM 集成与校对（由 `tg-integrator` + `tg-validator` 插件实现）：`tg-integrator` 把抓取素材 + 偏好合并为符合 schema 的方案 JSON（要求 LLM 引用 source_url）；`tg-validator` 做事实校对（名称拼写、价格区间、坐标城市匹配、开放时间格式），产出 `warnings[]`；两者均通过 Harness 工具调用 LLM，结果带缓存键。
+- **FR-17**: 数据计算/进化（由 `tg-optimizer` 插件实现，可选）：路线时间分配（贪心 + 时间窗）、预算校准（用真实价格替换 LLM 估值）、景点排序（坐标聚类 + 最近邻 TSP）；当简单算法仍达不到 AC 时再引入进化策略；优化结果仍交 `tg-validator` 二次校对。
+- **FR-18**: 缓存层（由 `tg-cache` 插件实现）：基于 SQLite 的 KV 缓存，按 (target_url+query)、(prompt+inputs hash)、(destination+prefs hash) 三级粒度，TTL 默认 7 天，可配置；命中时直接跳过 Scrapling 与 LLM 调用。
 - **FR-19**: 来源追溯：每个景点/美食/住宿/价格条目携带 `source_url` 字段；渲染时在卡片底部以小字展示"来源"链接，便于用户核实。
 
+### DeepSeek Harness 编排与自进化（可选 Python 后端 · 进阶）
+- **FR-20**: 后端启用时，编排核心为 `deepseek-harness-sdk`（PyPI 预发布版），通过 `DeepSeekHarness(dsh_home=..., provider="deepseek-official", model=..., max_tokens=...)` 启动一个 Standard 模式 Agent；FastAPI 仅作为 HTTP 适配壳，所有编排逻辑发生在 DSH 内部，不重写 Agent 主循环。
+- **FR-21**: 自研 Cordis 插件集 `tg-*`（planner/scraper/integrator/validator/optimizer/cache/output）以 Bundle 形式通过 `dsh plugin --profile sdk add file:...` 安装到独立 `DSH_HOME`，遵循插件契约（Cordis service/event）；每个插件独立可测、可热替换、可在 Creator 模式下做组合实验。
+- **FR-22**: Subagent 委派（可选）：对"多源并行抓取"或"研究 vs 集成 vs 校对"等可并行子任务，由父 Agent 用 DSH 内置的 subagent 机制拆出分支，分支完成后通过 `reportDelivery` 唤醒父任务；v1 默认串行，仅当 AC-9 性能不达标时启用并行。
+- **FR-23**: Trajectory 可观测：每次 `/generate` 调用返回 `session_id`，前端可通过 `/trajectory/{session_id}` 拉取该次执行的 append-only 轨迹（system prompt、思考、工具调用、子 Agent 调度、上下文注入）；前端在"调试视图"中按时间线展示，便于用户理解"为什么这样生成"。
+- **FR-24**: LLM Provider 兼容：DSH 默认 `deepseek-official` provider，但通过 OpenAI 兼容协议同样可挂 DeepSeek V4 / DeepSeek-V3 / OpenAI / 通义 / Moonshot；用户在设置面板填的 base_url/model/api_key 通过 `X-LLM-Config` header 传给后端，后端在启动 DSH 时通过 `base_url`/`api_key` 覆盖参数注入对应 provider，不在 DSH_HOME 持久化用户 key。
+- **FR-25**: 自进化接口（v1 仅可观测 + 手动实验）：暴露 `/plugin/reload`、`/trajectory/replay/{session_id}` 两个调试接口，允许在 Creator 模式下重新组合插件并回放历史轨迹评估效果；v1 不上线自动学习闭环，但保留接口与数据沉淀。
+- **FR-26**: 沙箱与安全：Scrapling 抓取与可能的 Bash/文件操作只在 DSH 的 Docker 沙箱（或本地 venv 隔离）内执行；高危命令与越权文件访问由 DSH 沙箱策略拦截；前端不接受任何来自前端的可执行代码注入。
+
 ## Non-Functional Requirements
-- **NFR-1（可运行性）**: 仅需现代浏览器，打开 `index.html`（或通过任意静态服务器）即可使用；前端可独立工作（纯前端模式直接调 LLM API）。启用 Python 后端时需 `python ≥ 3.10` 与 `pip install fastapi scrapling`（详见后端 README）。
-- **NFR-2（性能）**: 纯前端模式：单次方案生成 ≤ 60 秒；后端增强模式：抓取 + 集成 + 校对端到端 ≤ 90 秒（含缓存命中应 ≤ 10 秒）；页面首屏渲染 ≤ 2 秒。
-- **NFR-3（安全）**: API key 仅存于 localStorage，不在 URL/日志中暴露；所有 LLM 与爬虫返回内容渲染前做 HTML 转义，避免 XSS。后端仅作为代理/抓取服务，不持久化用户 API key。
+- **NFR-1（可运行性）**: 仅需现代浏览器，打开 `index.html`（或通过任意静态服务器）即可使用；前端可独立工作（纯前端模式直接调 LLM API）。启用 Python 后端时需 `python ≥ 3.10` 与 `pip install fastapi uvicorn scrapling deepseek-harness-sdk`（详见后端 README；DSH SDK 为预发布版，README 注明风险）。
+- **NFR-2（性能）**: 纯前端模式：单次方案生成 ≤ 60 秒；后端增强模式：抓取 + 集成 + 校对端到端 ≤ 90 秒（含缓存命中应 ≤ 10 秒）；页面首屏渲染 ≤ 2 秒。Subagent 并行模式下应再降 30% 端到端耗时（v1 不强制）。
+- **NFR-3（安全）**: API key 仅存于 localStorage，不在 URL/日志中暴露；所有 LLM 与爬虫返回内容渲染前做 HTML 转义，避免 XSS。后端仅在请求内存中持有用户 key（`X-LLM-Config` header），不写入 DSH_HOME 或磁盘。
 - **NFR-4（响应式）**: 桌面与移动端均可正常浏览，移动端宽度下导航与卡片自适应。
-- **NFR-5（可维护性）**: 代码按模块拆分（前端：配置、LLM 客户端、数据 schema、渲染、管理工具；后端：routes/scraper/orchestrator/validator/optimizer/cache），prompt 模板集中管理便于调优。
+- **NFR-5（可维护性）**: 代码按模块拆分（前端：配置、LLM 客户端、数据 schema、渲染、管理工具；后端：FastAPI 壳 + DSH 插件 Bundle：tg-planner/tg-scraper/tg-integrator/tg-validator/tg-optimizer/tg-cache/tg-output），prompt 模板集中管理便于调优。
 - **NFR-6（可访问性）**: 表单有 label，按钮有可识别文本，对比度符合阅读需求。
-- **NFR-7（合规抓取）**: 爬虫仅抓取公开可访问页面，遵守目标站点 `robots.txt`，单域名并发 ≤ 2，请求间设最小间隔（≥ 500ms）；不抓取需登录或付费墙内容。
-- **NFR-8（降级）**: 后端不可达或 Scrapling 抛错时，前端自动降级为"纯前端模式 + Wikimedia 图片"，保证手册仍可生成。
+- **NFR-7（合规抓取）**: 爬虫仅抓取公开可访问页面，遵守目标站点 `robots.txt`，单域名并发 ≤ 2，请求间设最小间隔（≥ 500ms）；不抓取需登录或付费墙内容。沙箱内执行，高危操作由 DSH 沙箱策略拦截。
+- **NFR-8（降级）**: 后端不可达 / DSH 启动失败 / Scrapling 抛错时，前端自动降级为"纯前端模式 + Wikimedia 图片"，保证手册仍可生成。
+- **NFR-9（可观测性）**: 后端模式下，每次生成返回 `session_id`，前端可拉取 Trajectory 轨迹并在调试视图中按时间线展示；所有 LLM/Scrapling/subagent 调用进入 append-only 日志，便于复盘与回放。
+- **NFR-10（演进友好）**: 所有 `tg-*` 插件遵循 Cordis 插件契约，支持热重载与配置级组合；v1 不强制上线自进化，但所有可热替换点必须可被 Creator 模式实验与 `/plugin/reload` 接口验证。
 
 ## Constraints
-- **Technical**: 前端为纯 HTML/CSS/原生 JS（ES Module），无构建步骤；后端为 Python FastAPI + Scrapling（`pip install fastapi uvicorn scrapling`）。大模型 API 采用 OpenAI 兼容 `/chat/completions` 协议（DeepSeek、OpenAI、通义、Moonshot 等均可），base_url/model/api_key 用户可配。
+- **Technical**: 前端为纯 HTML/CSS/原生 JS（ES Module），无构建步骤；后端为 Python FastAPI 薄壳 + `deepseek-harness-sdk`（Cordis 插件框架）+ Scrapling（作为 DSH 工具插件）。大模型 API 采用 OpenAI 兼容 `/chat/completions` 协议（DeepSeek V4/V3、OpenAI、通义、Moonshot 等均可），base_url/model/api_key 用户可配。
 - **Business**: 不引入付费第三方服务；爬虫仅消费公开网页，不绕过付费墙；图片优先使用 Wikimedia Commons 免 key 接口或 Scrapling 抓取的公开图片（带来源）。
-- **Dependencies**: 大模型 API 可用性；浏览器原生 `fetch`、`localStorage`；`html-to-image`（CDN）用于长图导出；可选后端依赖 `fastapi`、`scrapling`、`httpx`、`beautifulsoup4`（Scrapling 装好即带）。
+- **Dependencies**: 大模型 API 可用性；浏览器原生 `fetch`、`localStorage`；`html-to-image`（CDN）用于长图导出；可选后端依赖 `fastapi`、`uvicorn`、`scrapling`、`httpx`、`beautifulsoup4`、`deepseek-harness-sdk`（PyPI 预发布）。
 - **Reversibility**: 启用后端为可选增强；前端必须能在不启动后端的情况下完成"输入目的地 → 渲染手册 → 使用工具"的完整闭环。
+- **Versioning**: `deepseek-harness-sdk` 当前为 `0.1.5rc1` 预发布版，API 可能在后续版本调整；后端代码需在 README 注明锁定版本与升级风险，关键调用点用薄壳函数封装以便跟进。
 
 ## Assumptions
 - A1: 用户拥有可用的 OpenAI 兼容 API key（如 DeepSeek）。
@@ -81,6 +95,8 @@
 - A5: "旅游 skill 集"指应用内的功能模块集合（规划、清单、预算、编辑、收藏、导出），整体为独立 Web 应用。
 - A6: 启用后端增强模式时，用户具备本地运行 Python 服务的基础能力（venv + pip install + uvicorn 启动）。
 - A7: 抓取目标站点（Wikipedia、Wikivoyage、公开旅游攻略站等）的 `robots.txt` 允许常见 UA 抓取；如遇 403/429，Scrapling 通过 stealth 模式或换源降级。
+- A8: `deepseek-harness-sdk` 在用户运行时仍可从 PyPI 安装；若预发布版 API 调整，后端薄壳函数层负责跟进，不波及前端。
+- A9: DSH_HOME 目录与 Cordis profile 由后端进程在首次启动时初始化到 `server/.dsh-home/`，与用户全局 `~/.dsh` 隔离。
 
 ## Acceptance Criteria
 
@@ -172,10 +188,28 @@
 - **Pass Condition**: 仍能产出符合 schema 的方案；提示条可见
 - **Evidence**: 关闭后端前后的两次请求行为对比 + 提示条截图
 
+### AC-12: DSH 插件化编排可追溯
+- **Type**: `rule`
+- **Given**: 后端增强模式 + DSH Agent 正常运行
+- **When**: 用户提交一次生成请求
+- **Then**: 后端返回 `session_id`；调用 `GET /trajectory/{session_id}` 返回按时间排序的事件流，至少包含：system_prompt、tg-planner 调用、tg-scraper 调用、tg-integrator 调用、tg-validator 调用五个事件
+- **Pass Condition**: Trajectory JSON 含上述 5 类事件且顺序合理；前端调试视图按时间线展示
+- **Evidence**: `/trajectory` 返回 JSON + 前端调试视图截图
+
+### AC-13: 插件可热重载（自进化前置）
+- **Type**: `rule`
+- **Given**: 后端运行中
+- **When**: 调用 `POST /plugin/reload` 指定 `tg-validator` 插件的新 bundle 路径
+- **Then**: 后端在 10 秒内完成热重载，下次 `/generate` 调用使用新版本插件，无需重启 uvicorn
+- **Pass Condition**: 重载日志可见 "plugin reloaded: tg-validator"；前后两次 `/generate` 在相同输入下产出可观察差异或显式版本号变化
+- **Evidence**: 重载日志 + 两次生成结果对比
+
 ## Open Questions
-- [x] ~~**Q1 技术栈**~~：已确认前端可独立工作，后端为可选增强（FastAPI + Scrapling）。
+- [x] ~~**Q1 技术栈**~~：已确认前端可独立工作，后端为可选增强（FastAPI + DSH + Scrapling）。
 - [x] ~~**Q2 图片来源**~~：默认 Wikimedia Commons；后端模式下可由 Scrapling 抓取带来源的公开图片补充。
 - [x] ~~**Q3 大模型偏好**~~：已确认 OpenAI 兼容协议通用适配。
 - [x] ~~**Q4 "skill 集"形态**~~：已确认为应用内功能模块集合，非 TRAE Skill 封装。
 - [x] ~~**Q5 算法模型必要性**~~：预算/路线/排序等先用贪心 + LLM 校对即可；引入进化策略仅在简单方法不能达到 AC 时再启用（FR-17）。
-- [ ] **Q6 Scrapling MCP**：Scrapling 提供 MCP Server，是否在 v1 直接接入 MCP 还是先走 HTTP API？倾向 v1 走 HTTP API 简化部署，MCP 留作后续。
+- [x] ~~**Q6 编排框架**~~：采用 DeepSeek Harness（Cordis 全插件 + Trajectory + subagent + 自进化友好）作为后端编排核心，FastAPI 仅做 HTTP 壳。
+- [ ] **Q7 Scrapling MCP**：Scrapling 提供 MCP Server，v1 直接接入 MCP 还是先走 DSH 工具插件？倾向 v1 把 Scrapling 包成 `tg-scraper` Cordis 插件（FR-15），MCP 留作后续。
+- [ ] **Q8 DSH 沙箱模式**：v1 用 Docker 沙箱还是本地 venv 隔离？倾向 v1 用 venv 简化部署，Docker 沙箱作为 README 可选项。
