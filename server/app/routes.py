@@ -135,6 +135,12 @@ async def scrape_endpoint(request: Request):
     return JSONResponse(res)
 
 
+@router.get("/sessions")
+async def list_sessions(limit: int = 50):
+    """列出最近 N 个 session（前端调试视图选择用，AC-12 / NFR-9）。"""
+    return JSONResponse({"sessions": traj.list_sessions(limit=limit)})
+
+
 @router.get("/trajectory/{session_id}")
 async def get_trajectory(session_id: str):
     events = traj.read(session_id)

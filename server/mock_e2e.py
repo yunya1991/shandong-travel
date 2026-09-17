@@ -133,19 +133,34 @@ def _make_trajectory_events(session_id: str) -> list:
         {"ts": base_ts + 0.5, "iso": _iso(base_ts + 0.5),
          "type": "tg-planner.start", "payload": {"destination": "济南", "prefs": {"days": 3}}},
         {"ts": base_ts + 1.0, "iso": _iso(base_ts + 1.0),
-         "type": "tg-planner.tasks", "payload": {"tasks": [
-             {"target_url": "https://zh.wikipedia.org/wiki/趵突泉",
-              "source_type": "wikipedia", "query": "趵突泉"}]}},
+         "type": "tg-planner.tasks", "payload": {
+             "tasks": [
+                 {"target_url": "https://zh.wikipedia.org/wiki/趵突泉",
+                  "source_type": "wikipedia", "query": "趵突泉"}],
+             "tokens": {"prompt_tokens": 320, "completion_tokens": 180, "total_tokens": 500},
+             "elapsed_ms": 850,
+             "llm_model": "deepseek-chat",
+         }},
         {"ts": base_ts + 2.0, "iso": _iso(base_ts + 2.0),
          "type": "tg-scraper.batch", "payload": {"tasks": 1, "materials": 3}},
         {"ts": base_ts + 3.5, "iso": _iso(base_ts + 3.5),
          "type": "tg-integrator.start", "payload": {"materials_count": 3}},
         {"ts": base_ts + 5.0, "iso": _iso(base_ts + 5.0),
-         "type": "tg-integrator.done", "payload": {"daily_count": 3, "attractions_count": 2}},
+         "type": "tg-integrator.done", "payload": {
+             "daily_count": 3, "attractions_count": 2,
+             "tokens": {"prompt_tokens": 2100, "completion_tokens": 3400, "total_tokens": 5500},
+             "elapsed_ms": 4200,
+             "llm_model": "deepseek-chat",
+         }},
         {"ts": base_ts + 5.5, "iso": _iso(base_ts + 5.5),
          "type": "tg-validator.start", "payload": {}},
         {"ts": base_ts + 6.5, "iso": _iso(base_ts + 6.5),
-         "type": "tg-validator.done", "payload": {"warnings_count": 2}},
+         "type": "tg-validator.done", "payload": {
+             "warnings_count": 2,
+             "tokens": {"prompt_tokens": 1800, "completion_tokens": 220, "total_tokens": 2020},
+             "elapsed_ms": 1100,
+             "llm_model": "deepseek-chat",
+         }},
         {"ts": base_ts + 6.6, "iso": _iso(base_ts + 6.6),
          "type": "tg-output.done", "payload": {"sources_count": 3}},
     ]
@@ -172,6 +187,24 @@ class MockHandler(BaseHTTPRequestHandler):
         path = parse_url(self.path).path
         if path == "/health":
             body = json.dumps({"status": "ok", "dsh": "mock", "ts": time.time()}).encode()
+            self._send_json(200, body)
+            return
+        # /sessions?limit=50
+        if path == "/sessions":
+            # 列出最近的 session，按 session_id 倒序
+            sessions = []
+            for sid in sorted(_TRAJECTORIES.keys(), reverse=True)[:50]:
+                events = _TRAJECTORIES.get(sid, [])
+                if not events:
+                    continue
+                first = events[0]
+                sessions.append({
+                    "session_id": sid,
+                    "start_ts": first.get("ts"),
+                    "event_count": len(events),
+                    "types": [e.get("type") for e in events[:8]],
+                })
+            body = json.dumps({"sessions": sessions}, ensure_ascii=False).encode()
             self._send_json(200, body)
             return
         # /trajectory/{session_id}

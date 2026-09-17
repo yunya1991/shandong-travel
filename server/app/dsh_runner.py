@@ -83,9 +83,14 @@ async def run_pipeline(
     # 若调用方未传 materials，则由 planner 产出任务清单（v1 降级为空列表）
     if not materials:
         try:
-            tasks = await _invoke_planner(destination, prefs,
+            tasks, planner_meta = await _invoke_planner(destination, prefs,
                                            base_url=base_url, api_key=api_key, model=model)
-            traj.append(session_id, "tg-planner.tasks", {"tasks": tasks})
+            traj.append(session_id, "tg-planner.tasks", {
+                "tasks": tasks,
+                "tokens": planner_meta.get("usage", {}),
+                "elapsed_ms": planner_meta.get("elapsed_ms"),
+                "llm_model": planner_meta.get("model"),
+            })
         except Exception as e:
             traj.append(session_id, "tg-planner.error", {"msg": str(e)})
             tasks = []
@@ -110,9 +115,14 @@ async def run_pipeline(
     try:
         plan = await _invoke_integrator(destination, prefs, materials,
                                          base_url=base_url, api_key=api_key, model=model)
+        # _meta 由 llm_client 注入：tokens/elapsed_ms/model
+        integrator_meta = plan.pop("_meta", {}) if isinstance(plan, dict) else {}
         traj.append(session_id, "tg-integrator.done", {
             "daily_count": len(plan.get("daily", [])),
             "attractions_count": len(plan.get("attractions", [])),
+            "tokens": integrator_meta.get("usage", {}),
+            "elapsed_ms": integrator_meta.get("elapsed_ms"),
+            "llm_model": integrator_meta.get("model"),
         })
     except Exception as e:
         traj.append(session_id, "tg-integrator.error", {"msg": str(e)})
@@ -120,15 +130,22 @@ async def run_pipeline(
 
     # ====== 4. tg-validator：事实校对 ======
     traj.append(session_id, "tg-validator.start", {})
-    warnings_raw = await _invoke_validator(plan, materials,
-                                             base_url=base_url, api_key=api_key, model=model)
+    warnings_raw, validator_meta = await _invoke_validator(
+        plan, materials,
+        base_url=base_url, api_key=api_key, model=model,
+    )
     schema_check = validate_plan(plan)
     warnings = warnings_raw + [
         {"level": "medium", "field": e, "msg": e} for e in schema_check["errors"]
     ] + [
         {"level": "low", "field": w, "msg": w} for w in schema_check["warnings"]
     ]
-    traj.append(session_id, "tg-validator.done", {"warnings_count": len(warnings)})
+    traj.append(session_id, "tg-validator.done", {
+        "warnings_count": len(warnings),
+        "tokens": validator_meta.get("usage", {}),
+        "elapsed_ms": validator_meta.get("elapsed_ms"),
+        "llm_model": validator_meta.get("model"),
+    })
 
     # ====== 5. tg-output：组装响应 ======
     from .schema import make_response, _source_coverage
@@ -146,7 +163,8 @@ async def run_pipeline(
 
 
 # ====== 内部插件调用（v1 直接走 LLM，待 DSH SDK 正式版替换） ======
-async def _invoke_planner(destination: str, prefs: Dict[str, Any], **kw) -> List[Dict[str, Any]]:
+async def _invoke_planner(destination: str, prefs: Dict[str, Any], **kw) -> tuple:
+    """返回 (tasks: list, meta: dict)。meta 含 tokens/elapsed_ms/model。"""
     prompt = PLAN_SCRAPE_TASKS.format(
         destination=destination,
         prefs=json.dumps(prefs, ensure_ascii=False),
@@ -155,18 +173,19 @@ async def _invoke_planner(destination: str, prefs: Dict[str, Any], **kw) -> List
     ck = cache.key_llm("planner", prompt)
     cached = cache.get(ck)
     if cached is not None:
-        return cached if isinstance(cached, list) else cached.get("tasks", [])
+        return (cached if isinstance(cached, list) else cached.get("tasks", [])), {}
     res = await chat_completion(
         [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
         base_url=kw["base_url"], api_key=kw["api_key"], model=kw["model"],
         max_tokens=2000, response_format_json=True,
     )
+    meta = res.pop("_meta", {}) if isinstance(res, dict) else {}
     cache.set_(ck, res)
     if isinstance(res, list):
-        return res
+        return res, meta
     if isinstance(res, dict) and "tasks" in res:
-        return res["tasks"]
-    return []
+        return res["tasks"], meta
+    return [], meta
 
 
 def _scraper_callable() -> bool:
@@ -206,7 +225,8 @@ async def _invoke_integrator(destination: str, prefs: Dict[str, Any],
     return res
 
 
-async def _invoke_validator(plan: Dict[str, Any], materials: List[Dict[str, Any]], **kw) -> List[Dict[str, str]]:
+async def _invoke_validator(plan: Dict[str, Any], materials: List[Dict[str, Any]], **kw) -> tuple:
+    """返回 (warnings: list, meta: dict)。meta 含 tokens/elapsed_ms/model。"""
     prompt = VALIDATE_PLAN.format(
         plan=json.dumps(plan, ensure_ascii=False),
         materials=json.dumps(materials, ensure_ascii=False),
@@ -217,17 +237,18 @@ async def _invoke_validator(plan: Dict[str, Any], materials: List[Dict[str, Any]
     ck = cache.key_llm("validator", prompt + inputs_hash)
     cached = cache.get(ck)
     if isinstance(cached, list):
-        return cached
+        return cached, {}
     res = await chat_completion(
         [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
         base_url=kw["base_url"], api_key=kw["api_key"], model=kw["model"],
         max_tokens=2000, response_format_json=True,
     )
+    meta = res.pop("_meta", {}) if isinstance(res, dict) else {}
     warnings = res if isinstance(res, list) else (
         res.get("warnings", []) if isinstance(res, dict) else []
     )
     cache.set_(ck, warnings)
-    return warnings
+    return warnings, meta
 
 
 # ====== tg-optimizer：动态优化（基于监测数据产出 diff） ======
@@ -236,8 +257,8 @@ async def _invoke_optimizer(
     monitor_data: Dict[str, Any],
     whitelist: Optional[List[str]] = None,
     **kw,
-) -> List[Dict[str, Any]]:
-    """根据监测数据产出 ADD/SWAP/MOVE diff。不命中缓存（监测数据每次不同）。"""
+) -> tuple:
+    """返回 (diff: list, meta: dict)。不命中缓存（监测数据每次不同）。"""
     prompt = OPTIMIZE_DIFF.format(
         plan=json.dumps(plan, ensure_ascii=False),
         monitor_data=json.dumps(monitor_data, ensure_ascii=False),
@@ -248,11 +269,12 @@ async def _invoke_optimizer(
         base_url=kw["base_url"], api_key=kw["api_key"], model=kw["model"],
         max_tokens=1500, temperature=0.3, response_format_json=True,
     )
+    meta = res.pop("_meta", {}) if isinstance(res, dict) else {}
     if isinstance(res, list):
-        return res
+        return res, meta
     if isinstance(res, dict) and "diff" in res:
-        return res["diff"]
-    return []
+        return res["diff"], meta
+    return [], meta
 
 
 async def optimize_with_monitor_data(
@@ -278,11 +300,16 @@ async def optimize_with_monitor_data(
         "weather": monitor_data.get("weather", {}).get("days", [])[:3],
         "hotlist_count": monitor_data.get("hotlist_count", 0),
     })
-    diff = await _invoke_optimizer(
+    diff, opt_meta = await _invoke_optimizer(
         plan, monitor_data, whitelist,
         base_url=base_url, api_key=api_key, model=model,
     )
-    traj.append(session_id, "tg-optimizer.diff", {"diff": diff, "count": len(diff)})
+    traj.append(session_id, "tg-optimizer.diff", {
+        "diff": diff, "count": len(diff),
+        "tokens": opt_meta.get("usage", {}),
+        "elapsed_ms": opt_meta.get("elapsed_ms"),
+        "llm_model": opt_meta.get("model"),
+    })
 
     if not diff:
         return {"plan_id": plan_id, "diff": [], "applied_count": 0, "plan": plan}

@@ -6,6 +6,7 @@ DSH 可用时由 dsh_runner 路由到对应 provider，本模块不参与。
 from __future__ import annotations
 import json
 import os
+import time
 from typing import Any, Dict, Optional
 
 import httpx
@@ -26,6 +27,14 @@ async def chat_completion(
 
     response_format_json=True 时强制 JSON 输出（DeepSeek/OpenAI 均支持）。
     返回 dict：若解析为 JSON 则返回对象，否则返回 {"_raw": str}。
+
+    返回对象附带 `_meta` 字段（不在 LLM 输出里，便于 traj 记录 token/耗时）：
+      {
+        ..., "_meta": {
+          "elapsed_ms": int, "usage": {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int},
+          "model": str
+        }
+      }
     """
     url = f"{base_url.rstrip('/')}/chat/completions"
     body: Dict[str, Any] = {
@@ -37,6 +46,7 @@ async def chat_completion(
     if response_format_json:
         body["response_format"] = {"type": "json_object"}
 
+    t0 = time.time()
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             url,
@@ -46,16 +56,29 @@ async def chat_completion(
             },
             content=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         )
+    elapsed_ms = int((time.time() - t0) * 1000)
     if resp.status_code >= 400:
         raise RuntimeError(f"LLM HTTP {resp.status_code}: {resp.text[:500]}")
     data = resp.json()
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    usage = data.get("usage") or {}
+    meta = {
+        "elapsed_ms": elapsed_ms,
+        "usage": {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+        "model": data.get("model") or model,
+    }
     # 强制提取 JSON（容错：模型有时包 ```json ... ```）
     if response_format_json or _looks_json(content):
         parsed = _extract_json(content)
         if parsed is not None:
+            if isinstance(parsed, dict):
+                parsed["_meta"] = meta
             return parsed
-    return {"_raw": content}
+    return {"_raw": content, "_meta": meta}
 
 
 def _looks_json(s: str) -> bool:

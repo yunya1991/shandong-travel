@@ -181,6 +181,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | POST | `/generate` | 主入口：destination + prefs → plan + sources + warnings + session_id |
 | POST | `/scrape` | 手动触发抓取（用户粘贴 URL） |
 | GET | `/trajectory/{session_id}` | 拉取思考轨迹事件列表 |
+| GET | `/sessions?limit=50` | 列出最近 N 个 session（调试视图选择用） |
 | POST | `/trajectory/replay/{session_id}` | 重放历史轨迹到新 session |
 | WS | `/ws/{plan_id}` | 行程协同 + 动态优化 diff 推送 |
 | POST | `/plan/{plan_id}/monitor/start` | 启动后台监测任务（携带 LLM 配置 + 快照） |
@@ -278,12 +279,19 @@ DSH 是预发布 SDK（`deepseek-harness-sdk==0.1.5rc1`），存在以下风险�
    - 看到 9 类事件：system_prompt → tg-planner.start/tasks → tg-scraper.batch
      → tg-integrator.start/done → tg-validator.start/done → tg-output.done
    - 每个事件可展开 payload 看 LLM 实际产出
+   - LLM 调用事件附带 token 估算（prompt/completion/total）与耗时
+   - 顶部 summary 显示总 token 数与总耗时
+   - 可按分组过滤（系统/planner/scraper/集成/校对/优化/监测/缓存/输出）
+   - 可搜索事件类型或 payload 内容
 5. （可选）点「重放」把当前 session 重放到新 session，做回归测试
-6. （可选）启动监测：POST /plan/{plan_id}/monitor/start
+   - 重放后自动进入"对比模式"，每个事件旁边显示「✓ 一致」或「⚠ 差异」徽章
+   - 可展开查看原 payload 与重放 payload 的差异
+6. （可选）下拉框切换历史 session 查看其他轨迹
+7. （可选）启动监测：POST /plan/{plan_id}/monitor/start
    - 后台周期跑 tg-monitor → 若有 diff 自动应用 + WebSocket 推送
    - 前端 WebSocket 订阅 /ws/{plan_id} 可实时收到 optimize_diff 推送
-7. （可选）手动优化：POST /plan/{plan_id}/optimize 立即跑一次 monitor + optimize
-8. （可选）回滚：POST /plan/{plan_id}/revert/{version_id} 回到任意历史版本
+8. （可选）手动优化：POST /plan/{plan_id}/optimize 立即跑一次 monitor + optimize
+9. （可选）回滚：POST /plan/{plan_id}/revert/{version_id} 回到任意历史版本
 ```
 
 ### C. 开发者

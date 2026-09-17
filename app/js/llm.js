@@ -209,6 +209,19 @@ export async function fetchTrajectory(sessionId) {
 }
 
 /**
+ * 列出最近的 session（调试视图选择用，AC-12 / NFR-9）
+ */
+export async function fetchSessions(limit = 50) {
+  const config = loadConfig();
+  if (config.mode !== 'backend' || !config.backend_url) {
+    throw new Error('需切换为后端模式才能拉取 session 列表');
+  }
+  const res = await fetch(`${config.backend_url.replace(/\/$/, '')}/sessions?limit=${limit}`);
+  if (!res.ok) throw new Error(`sessions HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
  * 重放历史轨迹（Task 19 / FR-25）
  */
 export async function replayTrajectory(sessionId) {
