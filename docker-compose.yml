@@ -1,0 +1,36 @@
+# AI 旅行手册 · 一键 docker compose 部署
+# 使用 GH Actions 推送到 GHCR 的镜像
+# 用法：
+#   1. 复制 .env.example → .env，填入 LLM_API_KEY
+#   2. docker compose up -d
+#   3. 浏览器访问 http://localhost:8000
+services:
+  shandong-travel:
+    image: ghcr.io/yunya1991/shandong-travel:latest
+    container_name: shandong-travel
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM 配置：从 .env 读取
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required, copy .env.example to .env}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+      # 动态优化引擎：默认 auto 模式（云端无 cockpit）
+      TG_DYNAMIC_ENABLED: ${TG_DYNAMIC_ENABLED:-true}
+      TG_DYNAMIC_MODE: ${TG_DYNAMIC_MODE:-auto}
+      # 前端同源挂载 + SPA fallback
+      TG_STATIC_DIR: /app/static
+      # SQLite 路径：挂载到本机 ./data 持久化
+      TG_DB_PATH: /data/cache.db
+      # 驾驶舱在云端关闭
+      COCKPIT_DISABLE: "1"
+    volumes:
+      # 持久化 SQLite 数据，重启不丢
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
