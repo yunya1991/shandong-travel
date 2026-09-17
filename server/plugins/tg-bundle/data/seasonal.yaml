@@ -1,0 +1,49 @@
+# 当地特色素材库
+# 结构：{destination: [{name, months:[1-12], desc, source_url, type}]}
+# type 取值参考 spec FR-31 白名单：festival | market | exhibition | food | activity
+# 由 LLM + 规则混合生成并经 tg-validator 校对后入库（spec FR-28）
+
+济南:
+  - name: 趵突泉荷花节
+    months: [7, 8]
+    desc: 每年 7-8 月在大明湖举办，荷展与诗词会
+    source_url: https://zh.wikipedia.org/wiki/大明湖
+    type: festival
+  - name: 千佛山庙会
+    months: [9, 10]
+    desc: 重阳节前后，千佛山传统庙会
+    source_url: https://zh.wikipedia.org/wiki/千佛山
+    type: market
+
+呼伦贝尔:
+  - name: 那达慕大会
+    months: [7, 8]
+    desc: 7-8 月草原那达慕，赛马、摔跤、射箭
+    source_url: https://zh.wikipedia.org/wiki/那达慕
+    type: festival
+
+哈尔滨:
+  - name: 冰雪大世界
+    months: [12, 1, 2]
+    desc: 冬季冰雕主题乐园
+    source_url: https://zh.wikipedia.org/wiki/哈尔滨冰雪大世界
+    type: exhibition
+  - name: 哈尔滨之夏音乐会
+    months: [7, 8]
+    desc: 亚洲最大规模音乐节之一
+    source_url: https://zh.wikipedia.org/wiki/哈尔滨之夏音乐会
+    type: festival
+
+北京:
+  - name: 故宫特展
+    months: [4, 5, 9, 10]
+    desc: 春秋旺季，故宫常推限时特展
+    source_url: https://zh.wikipedia.org/wiki/故宫博物院
+    type: exhibition
+
+成都:
+  - name: 熊猫基地灯会
+    months: [1, 2]
+    desc: 春节前后，熊猫基地新春灯会
+    source_url: https://zh.wikipedia.org/wiki/成都大熊猫繁育研究基地
+    type: festival

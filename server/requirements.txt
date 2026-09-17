@@ -1,0 +1,15 @@
+# AI 旅行手册 · 后端依赖
+# Python >= 3.10
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+scrapling==0.2.4
+httpx==0.27.2
+python-dotenv==1.0.1
+beautifulsoup4==4.12.3
+# DeepSeek Harness SDK（PyPI 预发布版；锁定版本，升级需评估 API 变更）
+# 注：若该版本不存在或不可用，后端会自动降级为"内置 Agent 主循环"模式（见 dsh_runner.py）。
+deepseek-harness-sdk==0.1.5rc1; python_version >= "3.10"
+# WebSocket 与会话状态
+websockets==12.0
+# Open-Meteo 免费 API 默认（无 key），可选和风
+pyyaml==6.0.2
