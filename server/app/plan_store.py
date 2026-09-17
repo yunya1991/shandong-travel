@@ -122,10 +122,17 @@ def get_version(version_id: str) -> Optional[Dict[str, Any]]:
 def list_versions(plan_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT version_id, plan_id, parent_version_id, ts, trigger_reason, adopted FROM plan_versions WHERE plan_id=? ORDER BY ts DESC LIMIT ?",
+            "SELECT version_id, plan_id, parent_version_id, ts, trigger_reason, diff_json, adopted FROM plan_versions WHERE plan_id=? ORDER BY ts DESC LIMIT ?",
             (plan_id, limit),
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        # diff_json 字段在表里叫 diff_json，对外暴露为 diff（保持兼容）
+        if "diff_json" in d:
+            d["diff"] = d.pop("diff_json")
+        out.append(d)
+    return out
 
 
 def latest_version_id(plan_id: str) -> Optional[str]:

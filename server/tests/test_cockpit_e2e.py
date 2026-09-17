@@ -1,4 +1,4 @@
-"""DSH Web UI 驾驶舱 + 动态优化引擎端到端测试（Task 22 / TR-22.1~22.3 / Task 22+ 完善）
+"""DSH Web UI 驾驶舱 + 动态优化引擎端到端测试（Task 22 / Task 22+ / Task 23）
 
 覆盖：
 - TR-22.1: cockpit_state 三类视图聚合（思考轨迹 + 待审建议 + 阈值配置）
@@ -11,6 +11,11 @@
   * monitor 建议模式 demote pending 版本（保留原 adopted 不阻塞回滚）
   * monitor auto 模式直接广播 diff
   * mark_adopted / demote_version 行为正确性
+- Task 23：
+  * FR-33 协同冲突避让：user_edit 后 monitor 跳过对应 (day, field)
+  * 变更说明浮层位置（前端 JS 部分，后端只验 broadcast 不验 DOM）
+  * 同城热榜多源拉取 + 失败降级（不抛异常）
+  * changelog 聚合端点 + diff_versions 跨版本对比
 
 跑法：
     cd server && .venv/bin/python -m tests.test_cockpit_e2e
@@ -507,9 +512,234 @@ async def test_dynamic_disabled_skips_optimize():
     print("[TR-21.4 + Task22+] PASS: dynamic_enabled=false 跳过优化")
 
 
+# ====== Task 23 测试用例 ======
+
+async def test_fr33_user_edit_skips_corresponding_diff():
+    """FR-33：用户 5 分钟内编辑过 (day, field)，monitor 跳过该卡片 diff 仅推送提示。"""
+    await _setup_modules({"TG_DYNAMIC_MODE": "auto", "TG_DYNAMIC_ENABLED": "true"})
+
+    from app import routes, plan_store, monitor
+    from app.dsh_runner import apply_diff
+
+    plan_id = "test_plan_fr33"
+    plan_store.save_plan(plan_id, "sess_fr33", "济南", {})
+    initial_plan = {"overview": {"title": "济南"}, "daily": [
+        {"day": 1, "attractions": [{"name": "山东博物馆"}],
+         "food": [{"name": "把子肉"}]}]}
+    init_vid = plan_store.save_version(plan_id, initial_plan,
+                                        trigger_reason="initial_generate", adopted=True)
+
+    # 用户编辑过 Day 1 的 attractions 卡片（5 分钟内）
+    monitor.record_user_edit(plan_id, day=1, field="attractions")
+    assert monitor._is_field_user_edited(plan_id, 1, "attractions") is True
+    assert monitor._is_field_user_edited(plan_id, 1, "food") is False, \
+        "用户没编辑过 food，不应被避让"
+
+    # Mock optimizer：产出 2 条 diff，一条针对 attractions（应被避让），一条针对 food（应应用）
+    diff = [
+        {"op": "SWAP", "day": 1, "target_field": "attractions",
+         "old_item": {"name": "山东博物馆"},
+         "new_item": {"name": "济南市博物馆", "source_url": "https://example.com/m"},
+         "reason": "雷阵雨"},
+        {"op": "SWAP", "day": 1, "target_field": "food",
+         "old_item": {"name": "把子肉"},
+         "new_item": {"name": "甜沫", "source_url": "https://example.com/t"},
+         "reason": "热榜美食"},
+    ]
+    new_plan = apply_diff(initial_plan, diff)
+    new_vid = plan_store.save_version(plan_id, new_plan,
+                                       parent_version_id=init_vid,
+                                       trigger_reason="monitor_optimize",
+                                       diff=diff, adopted=True)
+
+    from app import dsh_runner
+    async def mock_optimize(*args, **kwargs):
+        return {"plan_id": plan_id, "new_version_id": new_vid,
+                "diff": diff, "applied_count": 2, "plan": new_plan}
+    dsh_runner.optimize_with_monitor_data = mock_optimize
+
+    monitor._meta[plan_id] = {
+        "llm_cfg": {"api_key": "sk-xxx"}, "plan": initial_plan,
+        "whitelist": ["attractions", "food"],
+    }
+    mock_ws = _MockWebSocket()
+    routes._ws_subs.setdefault(plan_id, []).append(mock_ws)
+
+    await monitor._maybe_optimize(plan_id, {"ts": 0}, monitor._meta[plan_id], "sess_fr33")
+
+    # 应广播 1 条 skipped_user_edit + 1 条 optimize_diff（仅 food 那条）
+    msg_types = [json.loads(m)["type"] for m in mock_ws.sent]
+    assert "optimize_skipped_user_edit" in msg_types, \
+        f"应推送 skipped_user_edit，实际 {msg_types}"
+    assert "optimize_diff" in msg_types, \
+        f"应仍推送 optimize_diff（food 部分），实际 {msg_types}"
+
+    # 验证 skipped 消息内容：包含 attractions 那条
+    skipped_msg = next(m for m in mock_ws.sent
+                       if json.loads(m)["type"] == "optimize_skipped_user_edit")
+    skipped_data = json.loads(skipped_msg)
+    assert skipped_data["skipped_count"] == 1
+    assert skipped_data["skipped"][0]["field"] == "attractions"
+    assert skipped_data["skipped"][0]["new_name"] == "济南市博物馆"
+
+    # 验证 optimize_diff 只包含 food 那条（safe_diff）
+    diff_msg = next(m for m in mock_ws.sent
+                    if json.loads(m)["type"] == "optimize_diff")
+    diff_data = json.loads(diff_msg)
+    assert len(diff_data["diff"]) == 1, \
+        f"应仅应用 food 那条 diff，实际 {len(diff_data['diff'])} 条"
+    assert diff_data["diff"][0]["target_field"] == "food"
+
+    # latest_version_id 应指向 safe_diff 产生的新版本
+    cur_vid = plan_store.latest_version_id(plan_id)
+    assert cur_vid != new_vid, "原 monitor 产出的全量版本应被 demote，新版本是 safe_diff 后的"
+    print("[FR-33 + Task23] PASS: user_edit 后 monitor 跳过对应 (day, field)")
+
+
+async def test_fr33_window_expires_after_5min():
+    """FR-33：5 分钟窗口过后不再避让。"""
+    import time as _time
+    await _setup_modules({"TG_DYNAMIC_MODE": "auto", "TG_DYNAMIC_ENABLED": "true"})
+
+    from app import monitor
+    plan_id = "test_plan_fr33_expire"
+    monitor.record_user_edit(plan_id, day=1, field="attractions")
+    # 手动把记录时间往前调 6 分钟
+    arr = monitor._user_edits.get(plan_id, [])
+    for e in arr:
+        e["ts"] = _time.time() - 360  # 6 分钟前
+    # 触发 GC：调 _is_field_user_edited 应自动清理
+    assert monitor._is_field_user_edited(plan_id, 1, "attractions") is False, \
+        "5 分钟窗口后应不再避让"
+    assert len(monitor._user_edits.get(plan_id, [])) == 0, \
+        "过期记录应被清理"
+    print("[FR-33 + Task23] PASS: 5 分钟窗口过后自动清理")
+
+
+async def test_changelog_aggregation_endpoint():
+    """Task 23：/plan/{id}/changelog 聚合端点正确返回跨 session changelog。"""
+    await _setup_modules({"TG_DYNAMIC_MODE": "suggest", "TG_DYNAMIC_ENABLED": "true"})
+
+    from app import routes, plan_store
+    plan_id = "test_plan_changelog"
+    plan_store.save_plan(plan_id, "sess_cl", "济南", {})
+    # 初始版本（无 diff）
+    plan_store.save_version(plan_id, {"overview": {"title": "济南"}, "daily": []},
+                             trigger_reason="initial_generate", adopted=True)
+    # 优化版本 1
+    plan_store.save_version(plan_id, {"overview": {"title": "济南"}, "daily": [
+        {"day": 1, "attractions": [{"name": "千佛山"}]}]},
+        trigger_reason="monitor_optimize",
+        diff=[{"op": "SWAP", "day": 1, "target_field": "attractions",
+               "old_item": {"name": "山东博物馆"},
+               "new_item": {"name": "千佛山", "source_url": "https://example.com/q"},
+               "reason": "天气变化"}],
+        adopted=True)
+    # 优化版本 2
+    plan_store.save_version(plan_id, {"overview": {"title": "济南"}, "daily": [
+        {"day": 1, "attractions": [{"name": "大明湖"}]}]},
+        trigger_reason="cockpit_adopt",
+        diff=[{"op": "SWAP", "day": 1, "target_field": "attractions",
+               "old_item": {"name": "千佛山"},
+               "new_item": {"name": "大明湖", "source_url": "https://example.com/d"},
+               "reason": "热榜"}],
+        adopted=True)
+
+    resp = await routes.get_changelog(plan_id)
+    data = json.loads(resp.body)
+
+    assert data["plan_id"] == plan_id
+    assert data["total_versions"] == 3
+    items = data["items"]
+    # 倒序：最新版本在前
+    assert items[0]["new_name"] == "大明湖"
+    assert items[1]["new_name"] == "千佛山"
+    assert items[2]["op"] == "INIT"  # initial_generate 无 diff
+    # update_count 应统计 monitor_optimize + cockpit_adopt（共 2）
+    assert data["update_count"] == 2, f"update_count 应为 2，实际 {data['update_count']}"
+    # 时间戳格式化字段
+    assert items[0]["ts_iso"]  # 非空
+    print("[Task23] PASS: /changelog 聚合端点正确返回跨 session 历史")
+
+
+async def test_diff_versions_endpoint():
+    """Task 23：/plan/{id}/diff_versions 对比两个版本的字段级差异。"""
+    await _setup_modules()
+
+    from app import routes, plan_store
+    plan_id = "test_plan_diff"
+    plan_store.save_plan(plan_id, "sess_diff", "济南", {})
+    plan_a = {"overview": {"title": "济南"}, "daily": [
+        {"day": 1, "attractions": [{"name": "千佛山"}, {"name": "大明湖"}],
+         "food": [{"name": "把子肉"}]}]}
+    plan_b = {"overview": {"title": "济南"}, "daily": [
+        {"day": 1, "attractions": [{"name": "趵突泉"}, {"name": "大明湖"}],
+         "food": [{"name": "把子肉"}, {"name": "甜沫"}]}]}
+    vid_a = plan_store.save_version(plan_id, plan_a,
+                                     trigger_reason="initial_generate", adopted=True)
+    vid_b = plan_store.save_version(plan_id, plan_b,
+                                     trigger_reason="monitor_optimize",
+                                     diff=[], adopted=True)
+
+    resp = await routes.diff_versions(plan_id, vid_a, vid_b)
+    data = json.loads(resp.body)
+    assert data["from"]["version_id"] == vid_a
+    assert data["to"]["version_id"] == vid_b
+    changes = data["changes"]
+    # 应有 2 条差异：attractions（千佛山 → 趵突泉）+ food（增加 甜沫）
+    assert len(changes) == 2
+    fields = [c["field"] for c in changes]
+    assert "attractions" in fields and "food" in fields
+    att_change = next(c for c in changes if c["field"] == "attractions")
+    assert "千佛山" in att_change["removed"]
+    assert "趵突泉" in att_change["added"]
+    food_change = next(c for c in changes if c["field"] == "food")
+    assert "甜沫" in food_change["added"]
+    print("[Task23] PASS: /diff_versions 字段级差异对比正确")
+
+
+async def test_hotlist_wikipedia_fallback_on_failure():
+    """Task 23：Wikipedia 主源失败时降级到 mafengwo 备选源，不抛异常。"""
+    await _setup_modules()
+
+    from app import monitor, traj
+    # Mock Wikipedia 失败 + mafengwo 也失败
+    async def mock_httpx_get(*args, **kwargs):
+        raise RuntimeError("network down")
+    import httpx as _httpx
+    orig_client = _httpx.AsyncClient
+
+    class _FailClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **kw):
+            raise RuntimeError("network down")
+    _httpx.AsyncClient = _FailClient
+
+    # Mock scraper.batch 也失败
+    from app import scraper
+    async def mock_batch(*a, **kw):
+        raise RuntimeError("scraper down")
+    scraper.batch = mock_batch
+
+    try:
+        result = await monitor.fetch_local_hotlist("济南")
+        assert result == [], "Wikipedia + mafengwo 都失败时应返回空列表"
+        # traj 应有两条失败日志
+        events = traj.read("monitor")
+        wik_failed = [e for e in events if e.get("type") == "tg-monitor.hotlist_wikipedia_failed"]
+        scr_failed = [e for e in events if e.get("type") == "tg-monitor.hotlist_scraper_failed"]
+        assert len(wik_failed) >= 1, "Wikipedia 失败应记录日志"
+        assert len(scr_failed) >= 1, "scraper 失败应记录日志"
+        print("[Task23] PASS: 热榜多源失败时降级到空列表 + 记录日志")
+    finally:
+        _httpx.AsyncClient = orig_client
+
+
 # ====== 跑入口 ======
 async def main():
-    print("\n=== Task 22+ 端到端测试 ===\n")
+    print("\n=== Task 22+ / Task 23 端到端测试 ===\n")
     await test_cockpit_state_returns_active_suggestions()
     await test_adopt_reuses_pending_version_id()
     await test_adopt_edited_falls_back_to_apply_diff()
@@ -517,6 +747,12 @@ async def main():
     await test_monitor_auto_mode_broadcasts_diff()
     await test_monitor_suggest_mode_seeds_pending()
     await test_dynamic_disabled_skips_optimize()
+    # Task 23
+    await test_fr33_user_edit_skips_corresponding_diff()
+    await test_fr33_window_expires_after_5min()
+    await test_changelog_aggregation_endpoint()
+    await test_diff_versions_endpoint()
+    await test_hotlist_wikipedia_fallback_on_failure()
     print("\n=== 全部测试通过 ✓ ===\n")
 
 

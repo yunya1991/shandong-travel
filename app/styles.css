@@ -788,31 +788,51 @@ strong { color: var(--accent); font-weight: 600; }
   100% { transform: scale(1); box-shadow: 0 0 0 3px rgba(217, 119, 87, 0); }
 }
 
-/* 变更说明浮层（FR-29） */
+/* 变更说明浮层（FR-29 / Task 23：改为卡片顶部内嵌 + 持久 + 可关闭） */
 .dyn-change-note {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(184, 85, 29, 0.95);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(90deg, rgba(184, 85, 29, 0.92) 0%, rgba(217, 119, 6, 0.92) 100%);
   color: #fff;
-  padding: 6px 12px;
-  border-radius: var(--radius-pill);
-  font-size: 0.74rem;
-  white-space: nowrap;
-  z-index: 5;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin-bottom: 6px;
+  box-shadow: 0 2px 6px rgba(184, 85, 29, 0.18);
   animation: dynNoteIn 0.3s ease;
 }
-.dyn-change-note__icon {
-  margin-right: 4px;
+.dyn-change-note__icon { flex-shrink: 0; }
+.dyn-change-note__reason { flex: 1; word-break: break-all; }
+.dyn-change-note__count {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-pill);
+  padding: 0 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
 }
-.attraction-item {
+.dyn-change-note__count:empty { display: none; }
+.dyn-change-note__close {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 4px;
+  opacity: 0.85;
+}
+.dyn-change-note__close:hover { opacity: 1; }
+.attraction-item,
+.food-item,
+.accommodation-item {
   position: relative;
 }
 @keyframes dynNoteIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* 建议模式确认对话框（FR-31） */

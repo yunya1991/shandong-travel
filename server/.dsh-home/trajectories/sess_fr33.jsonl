@@ -1,0 +1,2 @@
+{"ts": 1789632550.7717333, "iso": "2026-09-17T08:09:10+0000", "type": "tg-monitor.skipped_user_edit", "payload": {"plan_id": "test_plan_fr33", "skipped_count": 1, "skipped": [{"day": 1, "field": "attractions", "reason": "雷阵雨"}]}}
+{"ts": 1789632829.1115668, "iso": "2026-09-17T08:13:49+0000", "type": "tg-monitor.skipped_user_edit", "payload": {"plan_id": "test_plan_fr33", "skipped_count": 1, "skipped": [{"day": 1, "field": "attractions", "reason": "雷阵雨"}]}}

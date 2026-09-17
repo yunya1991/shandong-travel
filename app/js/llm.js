@@ -270,7 +270,36 @@ export async function fetchVersions(planId) {
   const config = loadConfig();
   if (!config.backend_url) throw new Error('需配置后端地址');
   const res = await fetch(`${config.backend_url.replace(/\/$/, '')}/plan/${encodeURIComponent(planId)}/versions`);
-  if (!res.ok) throw new Error(`versions HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new Error(`fetchVersions HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * 拉取聚合 changelog（Task 23：跨 session 重启后恢复徽章计数 + 抽屉内容）
+ */
+export async function fetchChangelog(planId) {
+  const config = loadConfig();
+  if (!config.backend_url) throw new Error('需配置后端地址');
+  const res = await fetch(`${config.backend_url.replace(/\/$/, '')}/plan/${encodeURIComponent(planId)}/changelog`);
+  if (!res.ok) {
+    throw new Error(`fetchChangelog HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * 对比两个版本的差异（Task 23：跨版本对比 UI 用）
+ */
+export async function diffVersions(planId, fromId, toId) {
+  const config = loadConfig();
+  if (!config.backend_url) throw new Error('需配置后端地址');
+  const url = `${config.backend_url.replace(/\/$/, '')}/plan/${encodeURIComponent(planId)}/diff_versions?from_id=${encodeURIComponent(fromId)}&to_id=${encodeURIComponent(toId)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`diffVersions HTTP ${res.status}`);
+  }
   return res.json();
 }
 

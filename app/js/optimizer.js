@@ -3,7 +3,7 @@
 // Task 22 / TR-22.2：接收 DSH Web UI 驾驶舱采纳后通过 WebSocket 推送的 diff
 import { loadConfig, escapeHtml } from './config.js';
 import { getCurrentResult, getCurrentPlanId, setCurrentResult } from './generate.js';
-import { triggerOptimize, fetchVersions, revertToVersion } from './llm.js';
+import { triggerOptimize, fetchVersions, fetchChangelog, diffVersions, revertToVersion } from './llm.js';
 
 // 本会话累计动态更新次数（仅前端展示用）
 let updateCount = 0;
@@ -71,6 +71,12 @@ export function startWsSubscription(planId) {
       // 驾驶舱采纳 / 驳回后通知前端清理 pending 徽章
       pendingCount = 0;
       updatePendingBadge();
+    } else if (data.type === 'optimize_skipped_user_edit' && data.plan_id === planId) {
+      // FR-33：用户最近编辑过该卡片，monitor 跳过 diff 仅推送提示
+      const skippedMsg = (data.skipped || []).map(s =>
+        `Day ${s.day} ${s.field}${s.new_name ? `（建议换为 ${s.new_name}）` : ''}`
+      ).join('、');
+      showToast(`⏭️ 已跳过你刚编辑的卡片：${skippedMsg}（FR-33 避让）`);
     }
   });
   _ws.addEventListener('close', () => {
@@ -95,6 +101,23 @@ export function stopWsSubscription() {
   if (_ws) {
     try { _ws.close(); } catch {}
     _ws = null;
+  }
+}
+
+/**
+ * 上报用户手动编辑事件给后端（FR-33 协同冲突避让，Task 23）
+ * 后端在 5 分钟窗口内跳过对应 (day, field) 的 diff。
+ * @param {number|null} day 卡片所在天（如 1/2/3）
+ * @param {string|null} field 字段名（attractions/food/accommodation）
+ */
+export function reportUserEdit(day, field) {
+  if (!_ws || _ws.readyState !== WebSocket.OPEN || !day || !field) return;
+  try {
+    _ws.send(JSON.stringify({
+      type: 'user_edit', plan_id: _wsPlanId, day, field,
+    }));
+  } catch (e) {
+    console.warn('[dyn-ws] reportUserEdit failed:', e);
   }
 }
 
@@ -171,6 +194,42 @@ export function mountDynamicControls() {
     controlsEl.querySelector('#dyn-undo')?.addEventListener('click', onUndo);
   }
   renderChangelog();
+  // Task 23：跨 session 恢复——从后端拉取聚合 changelog + update_count
+  _restoreChangelogFromBackend(planId);
+}
+
+/**
+ * 启动时从后端恢复 changelog（Task 23：跨 session 重启后不丢）
+ */
+async function _restoreChangelogFromBackend(planId) {
+  try {
+    const data = await fetchChangelog(planId);
+    if (data?.items?.length) {
+      // 后端 changelog 是按时间倒序，前端数组也是 unshift（倒序），所以直接赋值
+      changelog = data.items.map(it => ({
+        ts: it.ts_iso || new Date((it.ts || 0) * 1000).toISOString(),
+        reason: it.reason || '',
+        op: it.op || '?',
+        day: it.day,
+        target_field: it.target_field,
+        old_name: it.old_name,
+        new_name: it.new_name,
+        version_id: it.version_id,
+        source_url: it.source_url,
+        adopted: it.adopted,
+      }));
+    }
+    if (typeof data?.update_count === 'number') {
+      updateCount = data.update_count;
+    }
+    // 重新挂载控件以刷新徽章 + changelog 抽屉
+    const banner = document.querySelector('.guide-banner');
+    const old = banner?.querySelector('.dyn-controls');
+    if (old) old.remove();
+    mountDynamicControls();
+  } catch (e) {
+    console.warn('[dyn] restore changelog failed:', e);
+  }
 }
 
 /**
@@ -357,14 +416,40 @@ function applyOpToDOM(op) {
 }
 
 /**
- * 变更说明浮层（FR-29 / AC-14）
+ * 变更说明浮层（FR-29 / AC-14 / Task 23：位置修正为卡片上方 + 可关闭持久化）
+ * spec 要求"在变更卡片上方展示可读说明"——之前是 appendChild 在底部，
+ * Task 23 改为 insertBefore(itemEl.firstChild)，浮层位置真正在卡片顶部。
+ * 浮层不自动消失，由用户点 ✕ 关闭；同卡片多条说明折叠为一条带计数。
  */
 function showChangeNote(itemEl, reason) {
-  const note = document.createElement('div');
+  if (!itemEl) return;
+  // 已有浮层则合并计数
+  let note = itemEl.querySelector('.dyn-change-note');
+  if (note) {
+    const countEl = note.querySelector('.dyn-change-note__count');
+    let count = parseInt(countEl?.dataset?.count || '1', 10) + 1;
+    if (countEl) {
+      countEl.dataset.count = String(count);
+      countEl.textContent = `×${count}`;
+    }
+    // 更新 reason 为最新
+    const reasonEl = note.querySelector('.dyn-change-note__reason');
+    if (reasonEl) reasonEl.textContent = reason;
+    return;
+  }
+  note = document.createElement('div');
   note.className = 'dyn-change-note';
-  note.innerHTML = `<span class="dyn-change-note__icon">⚡</span> ${escapeHtml(reason)}`;
-  itemEl.appendChild(note);
-  setTimeout(() => note.remove(), 8000);
+  note.innerHTML = `
+    <span class="dyn-change-note__icon">⚡</span>
+    <span class="dyn-change-note__reason">${escapeHtml(reason)}</span>
+    <span class="dyn-change-note__count" data-count="1"></span>
+    <button class="dyn-change-note__close" title="我知道了">✕</button>
+  `;
+  note.querySelector('.dyn-change-note__close').addEventListener('click', () => {
+    note.remove();
+  });
+  // insertBefore 让浮层位于卡片内容最顶部
+  itemEl.insertBefore(note, itemEl.firstChild);
 }
 
 /**
@@ -456,16 +541,88 @@ function renderChangelog() {
     listEl.innerHTML = '<li>暂无变更</li>';
     return;
   }
-  listEl.innerHTML = changelog.map(e => `
+  // 抽屉底部加"版本对比"入口（Task 23）
+  const itemsHtml = changelog.map((e, idx) => `
     <li class="dyn-changelog__item">
       <span class="dyn-changelog__time">${escapeHtml(e.ts.slice(11, 19))}</span>
-      <span class="dyn-changelog__op dyn-changelog__op--${escapeHtml(e.op.toLowerCase())}">${escapeHtml(e.op)}</span>
-      <span>Day ${e.day} · ${escapeHtml(e.target_field)}</span>
+      <span class="dyn-changelog__op dyn-changelog__op--${escapeHtml((e.op || '?').toLowerCase())}">${escapeHtml(e.op || '?')}</span>
+      <span>Day ${e.day ?? '?'} · ${escapeHtml(e.target_field || '')}</span>
       <span>"${escapeHtml(e.old_name || '')}" → "${escapeHtml(e.new_name || '')}"</span>
-      <span class="dyn-changelog__reason">${escapeHtml(e.reason)}</span>
+      <span class="dyn-changelog__reason">${escapeHtml(e.reason || '')}</span>
       ${e.source_url ? `<a class="source-link" href="${escapeHtml(e.source_url)}" target="_blank" rel="noopener">来源 ↗</a>` : ''}
       <span class="dyn-changelog__adopted">${e.adopted ? '✓ 已采纳' : '✗ 已驳回'}</span>
+      ${e.version_id ? `<button class="btn btn--secondary btn--sm dyn-compare-btn" data-idx="${idx}" title="与上一版本对比差异">⇄ 对比</button>` : ''}
     </li>`).join('');
+  listEl.innerHTML = itemsHtml;
+  // 绑定对比按钮
+  listEl.querySelectorAll('.dyn-compare-btn').forEach(btn => {
+    btn.addEventListener('click', () => onCompareVersion(parseInt(btn.dataset.idx, 10)));
+  });
+}
+
+/**
+ * 版本对比对话框（Task 23）：拉取后端 diff_versions，展示字段级差异
+ */
+async function onCompareVersion(idx) {
+  const entry = changelog[idx];
+  if (!entry?.version_id) return;
+  // 找它的前一条 changelog 项作为 from
+  const prevEntry = changelog.slice(idx + 1).find(e => e.version_id && e.version_id !== entry.version_id);
+  const planId = getCurrentPlanId() || getCurrentResult()?.planId;
+  if (!planId) {
+    showToast('未找到 plan_id');
+    return;
+  }
+  // 若没有 prev，则用 fetchVersions 找最早版本
+  let fromId = prevEntry?.version_id;
+  if (!fromId) {
+    try {
+      const data = await fetchVersions(planId);
+      const sorted = (data.versions || []).slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      fromId = sorted[0]?.version_id;
+    } catch (e) { /* ignore */ }
+  }
+  if (!fromId || fromId === entry.version_id) {
+    showToast('无可对比的上一版本');
+    return;
+  }
+  try {
+    const diff = await diffVersions(planId, fromId, entry.version_id);
+    _showCompareModal(diff);
+  } catch (e) {
+    showToast(`对比失败：${e.message}`);
+  }
+}
+
+function _showCompareModal(diff) {
+  const changes = diff.changes || [];
+  const fromInfo = diff.from || {};
+  const toInfo = diff.to || {};
+  const changesHtml = changes.length ? changes.map(c => `
+    <li>
+      <strong>Day ${c.day} · ${escapeHtml(c.field)}</strong><br>
+      ${c.removed?.length ? `<span style="color:#c0392b;">移除: ${escapeHtml(c.removed.join(', '))}</span><br>` : ''}
+      ${c.added?.length ? `<span style="color:#27ae60;">新增: ${escapeHtml(c.added.join(', '))}</span><br>` : ''}
+      ${(!c.removed?.length && !c.added?.length) ? `<span style="color:var(--page-text-muted);">顺序调整：${escapeHtml((c.from_items || []).join(' → '))} → ${escapeHtml((c.to_items || []).join(' → '))}</span>` : ''}
+    </li>`).join('') : '<li>无差异</li>';
+  const modal = document.createElement('div');
+  modal.className = 'dyn-modal';
+  modal.innerHTML = `
+    <div class="dyn-modal__backdrop"></div>
+    <div class="dyn-modal__dialog">
+      <h3>版本对比</h3>
+      <p style="color:var(--page-text-muted);font-size:0.82rem;">
+        从 ${escapeHtml(fromInfo.ts_iso || '')} → 到 ${escapeHtml(toInfo.ts_iso || '')}
+      </p>
+      <ul class="dyn-modal__list">${changesHtml}</ul>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn btn--secondary" id="dyn-compare-close">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector('#dyn-compare-close').addEventListener('click', () => modal.remove());
+  modal.querySelector('.dyn-modal__backdrop').addEventListener('click', () => modal.remove());
 }
 
 /**

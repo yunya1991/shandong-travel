@@ -183,6 +183,117 @@ async def list_versions(plan_id: str):
     return JSONResponse({"plan_id": plan_id, "versions": plan_store.list_versions(plan_id)})
 
 
+@router.get("/plan/{plan_id}/changelog")
+async def get_changelog(plan_id: str):
+    """聚合 changelog（Task 23 / 跨 session 重启后不丢）。
+
+    从 plan_versions 表读取所有版本（按时间倒序），合并 diff 与 trigger_reason
+    作为可读 changelog。前端 mountDynamicControls 启动时拉取以恢复徽章计数与抽屉内容。
+    """
+    versions = plan_store.list_versions(plan_id, limit=200)
+    items = []
+    for v in versions:
+        diff = v.get("diff") or []
+        try:
+            if isinstance(diff, str):
+                diff = json.loads(diff)
+        except Exception:
+            diff = []
+        reason = v.get("trigger_reason") or ""
+        ts = v.get("ts") or 0
+        adopted = bool(v.get("adopted"))
+        # 把 diff 多条展开为 changelog 多项
+        if not diff:
+            items.append({
+                "ts": ts, "ts_iso": _iso(ts),
+                "op": "INIT", "day": None, "target_field": None,
+                "old_name": None, "new_name": None,
+                "version_id": v.get("version_id"),
+                "reason": reason, "adopted": adopted,
+                "source_url": None,
+            })
+            continue
+        for d in diff:
+            ni = d.get("new_item") or {}
+            oi = d.get("old_item") or {}
+            items.append({
+                "ts": ts, "ts_iso": _iso(ts),
+                "op": d.get("op", "?"),
+                "day": d.get("day"),
+                "target_field": d.get("target_field"),
+                "old_name": oi.get("name") if isinstance(oi, dict) else None,
+                "new_name": ni.get("name") if isinstance(ni, dict) else None,
+                "version_id": v.get("version_id"),
+                "reason": d.get("reason", reason),
+                "adopted": adopted,
+                "source_url": ni.get("source_url") if isinstance(ni, dict) else None,
+            })
+    return JSONResponse({
+        "plan_id": plan_id,
+        "total_versions": len(versions),
+        "items": items,
+        "update_count": sum(1 for v in versions if (v.get("diff") or [])
+                            and (v.get("trigger_reason") or "").startswith(("monitor_optimize", "cockpit_adopt", "manual_seed"))),
+    })
+
+
+@router.get("/plan/{plan_id}/diff_versions")
+async def diff_versions(plan_id: str, from_id: str, to_id: str):
+    """对比两个版本的差异（Task 23：跨版本对比 UI 用）。
+
+    返回 {from, to, changes: [{day, field, from_item, to_item}]}
+    仅对比 daily[].attractions/food/accommodation 三类；其它字段（overview 等）只做摘要。
+    """
+    fv = plan_store.get_version(from_id)
+    tv = plan_store.get_version(to_id)
+    if not fv or fv["plan_id"] != plan_id:
+        raise HTTPException(status_code=404, detail="from version not found")
+    if not tv or tv["plan_id"] != plan_id:
+        raise HTTPException(status_code=404, detail="to version not found")
+    changes = _diff_plans(fv.get("plan") or {}, tv.get("plan") or {})
+    return JSONResponse({
+        "plan_id": plan_id,
+        "from": {"version_id": from_id, "ts": fv.get("ts"), "ts_iso": _iso(fv.get("ts") or 0)},
+        "to": {"version_id": to_id, "ts": tv.get("ts"), "ts_iso": _iso(tv.get("ts") or 0)},
+        "changes": changes,
+    })
+
+
+def _iso(ts: float) -> str:
+    """时间戳 → ISO 字符串（仅用于展示）。"""
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromtimestamp(float(ts)).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def _diff_plans(a: Dict[str, Any], b: Dict[str, Any]) -> list:
+    """对比两个 plan 的 daily 部分，输出字段级差异。"""
+    a_days = {(d.get("day") or 0): d for d in (a.get("daily") or [])}
+    b_days = {(d.get("day") or 0): d for d in (b.get("daily") or [])}
+    changes = []
+    all_days = sorted(set(a_days.keys()) | set(b_days.keys()))
+    for day in all_days:
+        ad = a_days.get(day, {})
+        bd = b_days.get(day, {})
+        for field in ("attractions", "food", "accommodation"):
+            a_items = ad.get(field) or []
+            b_items = bd.get(field) or []
+            a_names = [it.get("name") for it in a_items if isinstance(it, dict)]
+            b_names = [it.get("name") for it in b_items if isinstance(it, dict)]
+            if a_names == b_names:
+                continue
+            changes.append({
+                "day": day, "field": field,
+                "from_items": a_names,
+                "to_items": b_names,
+                "added": [n for n in b_names if n not in a_names],
+                "removed": [n for n in a_names if n not in b_names],
+            })
+    return changes
+
+
 @router.get("/plan/{plan_id}/version/{version_id}")
 async def get_version(plan_id: str, version_id: str):
     v = plan_store.get_version(version_id)
@@ -287,8 +398,13 @@ async def ws_plan(websocket: WebSocket, plan_id: str):
                 # 协同冲突解决（FR-33）：记录时间戳供 optimizer 查询
                 traj.append(data.get("session_id", "ws"), "user.edit", {
                     "plan_id": plan_id, "field": data.get("field"),
+                    "day": data.get("day"),
                     "ts": time.time(),
                 })
+                # Task 23：调用 monitor.record_user_edit，让 _maybe_optimize 避让该 (day, field)
+                monitor.record_user_edit(
+                    plan_id, data.get("day"), data.get("field"),
+                )
                 # 同步 monitor 快照（如用户拉了景点顺序，下一次优化基于新版本）
                 if data.get("plan"):
                     monitor.update_plan_snapshot(plan_id, data["plan"])

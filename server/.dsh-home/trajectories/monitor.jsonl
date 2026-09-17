@@ -1,0 +1,4 @@
+{"ts": 1789632550.8594952, "iso": "2026-09-17T08:09:10+0000", "type": "tg-monitor.hotlist_wikipedia_failed", "payload": {"destination": "济南", "msg": "network down"}}
+{"ts": 1789632550.8597772, "iso": "2026-09-17T08:09:10+0000", "type": "tg-monitor.hotlist_scraper_failed", "payload": {"destination": "济南", "msg": "scraper down"}}
+{"ts": 1789632829.2048397, "iso": "2026-09-17T08:13:49+0000", "type": "tg-monitor.hotlist_wikipedia_failed", "payload": {"destination": "济南", "msg": "network down"}}
+{"ts": 1789632829.2051425, "iso": "2026-09-17T08:13:49+0000", "type": "tg-monitor.hotlist_scraper_failed", "payload": {"destination": "济南", "msg": "scraper down"}}

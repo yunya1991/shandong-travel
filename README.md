@@ -304,7 +304,7 @@ TG_COCKPIT_HOST=127.0.0.1 TG_COCKPIT_PORT=3080 TG_BACKEND_URL=http://127.0.0.1:8
 - 建议模式（`TG_DYNAMIC_MODE=suggest`）下，monitor 产出的 diff 会暂存到驾驶舱 pending 池，不直接应用；自动模式（`TG_DYNAMIC_MODE=auto`）下，diff 直接推送前端
 - 前端 banner 上「🛫 待审 N」徽章会指向 cockpit URL（可在设置中配置 host/port），点击直接跳转驾驶舱；徽章计数通过 WebSocket 实时刷新
 
-### 端点一览（Task 22+）
+### 端点一览（Task 22+ / Task 23）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -315,6 +315,18 @@ TG_COCKPIT_HOST=127.0.0.1 TG_COCKPIT_PORT=3080 TG_BACKEND_URL=http://127.0.0.1:8
 | POST | `/plan/{plan_id}/suggestions/{sid}/adopt` | 采纳建议：复用 pending_version_id 或 fresh apply_diff，广播 diff + resolved |
 | POST | `/plan/{plan_id}/suggestions/{sid}/reject` | 驳回建议：不应用 diff，demote pending 版本，广播 resolved |
 | POST | `/plan/{plan_id}/suggestions/{sid}/edit` | 编辑建议 diff：保留为 edited 状态，等待再采纳 |
+| GET | `/plan/{plan_id}/changelog` | **Task 23**：聚合 changelog（跨 session 重启不丢），含 update_count |
+| GET | `/plan/{plan_id}/diff_versions?from_id=X&to_id=Y` | **Task 23**：对比两个版本的字段级差异（attractions/food/accommodation 增删） |
+| WebSocket | `/ws/plan/{plan_id}` | 接收 `optimize_diff` / `optimize_suggestion_pending` / `optimize_suggestion_resolved` / **Task 23** `optimize_skipped_user_edit` 推送；前端反向发 `user_edit` 触发 FR-33 避让 |
+
+### Task 23 新增功能
+
+1. **FR-33 协同冲突避让**：用户在前端双击编辑某卡片后，前端通过 WebSocket 上报 `user_edit`；后端 monitor 在 5 分钟窗口内跳过对应 `(day, field)` 的 diff，仅推送 `optimize_skipped_user_edit` 提示。部分被避让时用 `safe_diff` 重新 apply 并 demote 原全量版本，避免覆盖用户编辑。
+2. **变更说明浮层位置修正**：[showChangeNote](app/js/optimizer.js) 改为 `insertBefore(itemEl.firstChild)` 真正位于卡片上方，多条说明折叠计数 + 用户可手动关闭。
+3. **同城热榜多源拉取**：[fetch_local_hotlist](server/app/monitor.py) 主源 Wikipedia "On this day" API（开放、无 key、稳定），备选源 mafengwo 搜索抓取；任一失败降级到空列表 + 记录 traj 日志，不抛异常。
+4. **changelog 聚合 + 跨版本对比**：
+   - 后端 `/changelog` 端点从 `plan_versions` 表聚合历史，前端 mountDynamicControls 启动时拉取恢复徽章计数与抽屉内容（跨 session 重启不丢）。
+   - 后端 `/diff_versions` 端点对比两个版本的 attractions/food/accommodation 字段级差异；前端 changelog 抽屉每条新增"⇄ 对比"按钮，弹出 modal 展示增删 / 顺序调整。
 
 ### 手动塞 mock 建议（演示用）
 

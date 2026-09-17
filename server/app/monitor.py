@@ -79,18 +79,100 @@ async def fetch_weather(destination: str, target_date: Optional[str] = None) -> 
 async def fetch_local_hotlist(destination: str, day_offset: int = 0) -> List[Dict[str, Any]]:
     """爬取同城热榜（演出/市集/展览/限时活动）。
 
-    v1 用 Scrapling 抓公开页（穷游、马蜂窝活动页等），失败返回空列表。
+    Task 23：升级为多源拉取 + 失败降级：
+    1. 主源：Wikipedia "On this day" API（开放、无 key、稳定），按 destination 关键词筛选相关历史事件
+    2. 备选源：Scrapling 抓 mafengwo 活动页（保留原逻辑）
+    任一成功即返回非空列表；全部失败返回空列表（不抛异常，FR-28 容错）
     """
-    # 用关键词构造任务清单（不预置具体 URL，由 scraper 处理）
-    tasks = [
-        {
-            "target_url": f"https://www.mafengwo.cn/search/q.php?q={destination}+活动",
-            "source_type": "generic", "query": f"{destination} 活动",
-            "fields": ["name", "desc", "date", "venue"],
-        },
-    ]
-    res = await scraper.batch(tasks)
-    return res.get("materials", [])
+    results: List[Dict[str, Any]] = []
+
+    # 主源：Wikipedia Events API（按目的地关键词筛近期事件）
+    try:
+        results.extend(await _fetch_wikipedia_events(destination))
+    except Exception as e:
+        # 不抛错，记录日志后继续备选源
+        from . import traj as _traj
+        _traj.append("monitor", "tg-monitor.hotlist_wikipedia_failed", {
+            "destination": destination, "msg": str(e),
+        })
+
+    # 备选源：Scrapling 抓 mafengwo 活动页
+    if not results:
+        try:
+            tasks = [
+                {
+                    "target_url": f"https://www.mafengwo.cn/search/q.php?q={destination}+活动",
+                    "source_type": "generic", "query": f"{destination} 活动",
+                    "fields": ["name", "desc", "date", "venue"],
+                },
+            ]
+            res = await scraper.batch(tasks)
+            materials = res.get("materials", [])
+            for m in materials:
+                if m.get("name"):
+                    results.append({
+                        "name": m.get("name", ""),
+                        "desc": m.get("desc", ""),
+                        "date": m.get("date", ""),
+                        "venue": m.get("venue", ""),
+                        "source_url": m.get("source_url") or m.get("url", ""),
+                        "source_type": "mafengwo",
+                    })
+        except Exception as e:
+            from . import traj as _traj2
+            _traj2.append("monitor", "tg-monitor.hotlist_scraper_failed", {
+                "destination": destination, "msg": str(e),
+            })
+
+    return results
+
+
+async def _fetch_wikipedia_events(destination: str) -> List[Dict[str, Any]]:
+    """从 Wikipedia "On this Day" API 拉取当日历史事件，按目的地关键词筛选。
+
+    API: https://en.wikipedia.org/api/rest_v1/feed/onthisday/events/{MM}/{DD}
+    返回结构：[{text, year, pages: [{title, ...}], ...}]
+    筛选：text 或 page title 含 destination 关键词的事件
+    返回：[{name, desc, date, venue, source_url, source_type}]
+    """
+    import datetime as _dt
+    now = _dt.datetime.now()
+    url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/events/{now.month:02d}/{now.day:02d}"
+    async with httpx.AsyncClient(timeout=10, trust_env=True) as client:
+        r = await client.get(url, headers={
+            "User-Agent": "tg-monitor/1.0 (https://example.local/tg-monitor)",
+            "Accept": "application/json",
+        })
+    if r.status_code >= 400:
+        return []
+    data = r.json()
+    events = data.get("events", []) if isinstance(data, dict) else []
+    out: List[Dict[str, Any]] = []
+    dest_lower = (destination or "").lower()
+    for ev in events[:50]:  # 限制扫描前 50 条避免过大
+        text = ev.get("text", "") or ""
+        year = ev.get("year")
+        # 关键词匹配：目的地名称出现在 text 中
+        if dest_lower and dest_lower not in text.lower():
+            # 也看 pages 的 title
+            pages = ev.get("pages") or []
+            page_titles = " ".join(p.get("title", "") for p in pages).lower()
+            if dest_lower not in page_titles:
+                continue
+        # 构造 source_url：优先取第一个 page 的 content_urls.desktop.page
+        source_url = ""
+        pages = ev.get("pages") or []
+        if pages:
+            source_url = (pages[0].get("content_urls") or {}).get("desktop", {}).get("page", "")
+        out.append({
+            "name": text[:80] + ("…" if len(text) > 80 else ""),
+            "desc": text,
+            "date": f"{year}-{now.month:02d}-{now.day:02d}" if year else "",
+            "venue": destination,
+            "source_url": source_url or "https://en.wikipedia.org/wiki/Wikipedia:On_this_day",
+            "source_type": "wikipedia_onthisday",
+        })
+    return out[:10]  # 最多 10 条
 
 
 async def monitor_once(
@@ -119,6 +201,47 @@ async def monitor_once(
 _tasks: Dict[str, asyncio.Task] = {}
 # 监测元数据：plan_id -> {llm_cfg, plan_snapshot, whitelist}
 _meta: Dict[str, Dict[str, Any]] = {}
+
+# FR-33 协同冲突避让：plan_id -> [{"ts", "day", "field"}, ...]
+# 用户最近 5 分钟内手动编辑过的 (day, field) 卡片，monitor 跳过对应 diff
+# 仅推送一条 "skipped_due_to_user_edit" 提示，不应用变更
+_user_edits: Dict[str, List[Dict[str, Any]]] = {}
+_USER_EDIT_WINDOW_SEC = 300  # 5 分钟
+
+
+def record_user_edit(plan_id: str, day: Optional[int], field: Optional[str]) -> None:
+    """记录用户手动编辑事件（FR-33）。
+
+    由 routes.ws_plan 在收到 user_edit 消息时调用；monitor._maybe_optimize
+    会查询本表，跳过对应 (day, field) 的 diff。
+    """
+    if not plan_id or day is None or not field:
+        return
+    _user_edits.setdefault(plan_id, []).append({
+        "ts": time.time(), "day": day, "field": field,
+    })
+    # 顺手清理过期项
+    _gc_user_edits(plan_id)
+
+
+def _gc_user_edits(plan_id: str) -> None:
+    """清理超过 5 分钟的 user_edit 记录。"""
+    now = time.time()
+    arr = _user_edits.get(plan_id, [])
+    fresh = [e for e in arr if now - e["ts"] < _USER_EDIT_WINDOW_SEC]
+    if len(fresh) != len(arr):
+        _user_edits[plan_id] = fresh
+
+
+def _is_field_user_edited(plan_id: str, day: Optional[int], field: Optional[str]) -> bool:
+    """判断 (day, field) 是否在用户最近 5 分钟编辑窗口内。"""
+    if not plan_id or day is None or not field:
+        return False
+    _gc_user_edits(plan_id)
+    for e in _user_edits.get(plan_id, []):
+        if e["day"] == day and e["field"] == field:
+            return True
+    return False
 
 
 def start_monitor_loop(
@@ -209,6 +332,67 @@ async def _maybe_optimize(
             return
         diff = result.get("diff", [])
         reason = "monitor_optimize"
+        # FR-33 协同冲突避让：把 diff 按 (day, field) 是否在用户编辑窗口内拆分
+        # safe_diff：可应用的；skipped_diff：跳过的（仅推送提示）
+        safe_diff: List[Dict[str, Any]] = []
+        skipped_diff: List[Dict[str, Any]] = []
+        for d in diff:
+            day = d.get("day")
+            field = d.get("target_field")
+            if _is_field_user_edited(plan_id, day, field):
+                skipped_diff.append(d)
+            else:
+                safe_diff.append(d)
+        # 若有跳过项，记录 traj + 推送提示给前端
+        if skipped_diff:
+            traj.append(session_id or traj.new_session_id(),
+                        "tg-monitor.skipped_user_edit", {
+                "plan_id": plan_id,
+                "skipped_count": len(skipped_diff),
+                "skipped": [
+                    {"day": d.get("day"), "field": d.get("target_field"),
+                     "reason": d.get("reason", "")} for d in skipped_diff
+                ],
+            })
+            await broadcast_diff(plan_id, {
+                "type": "optimize_skipped_user_edit",
+                "plan_id": plan_id,
+                "skipped_count": len(skipped_diff),
+                "skipped": [
+                    {"day": d.get("day"), "field": d.get("target_field"),
+                     "reason": d.get("reason", ""),
+                     "new_name": (d.get("new_item") or {}).get("name", "")}
+                    for d in skipped_diff
+                ],
+                "origin": "monitor_fr33",
+            })
+        # 全部被避让：不应用任何 diff，结束本次
+        if not safe_diff:
+            return
+        # 部分被避让：用 safe_diff 替换 diff，重新 apply
+        if len(safe_diff) != len(diff):
+            from . import dsh_runner as _dsh
+            from . import plan_store as _ps2
+            cur_vid = _ps2.latest_version_id(plan_id)
+            cur_plan = _ps2.get_version(cur_vid)["plan"] if cur_vid else plan
+            new_plan_partial = _dsh.apply_diff(cur_plan, safe_diff)
+            # 覆盖 result 中的 plan + diff（不重新调 LLM，节省成本）
+            result["plan"] = new_plan_partial
+            result["diff"] = safe_diff
+            result["applied_count"] = len(safe_diff)
+            # 重新 save_version（之前 dsh_runner 已 save 过完整 diff，
+            # 现在用 safe_diff 覆盖：demote 旧版本，再 save 新版本）
+            from . import plan_store as _ps3
+            old_vid = result.get("new_version_id")
+            if old_vid:
+                _ps3.demote_version(old_vid)
+            result["new_version_id"] = _ps3.save_version(
+                plan_id, new_plan_partial,
+                parent_version_id=cur_vid,
+                trigger_reason=f"monitor_optimize_partial_{len(safe_diff)}_of_{len(diff)}",
+                diff=safe_diff, adopted=True,
+            )
+            diff = safe_diff
         # 取第一条 diff 的 source_url 做说明（若有）
         source_url = ""
         for d in diff:

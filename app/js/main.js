@@ -1,6 +1,7 @@
 // 应用入口：导航切换、视图调度
 import { initSettings } from './config.js';
 import { initGenerate } from './generate.js';
+import { initEditor } from './tools/editor.js';
 
 const tabs = document.querySelectorAll('.app-nav__tab');
 const views = document.querySelectorAll('.view');
@@ -23,3 +24,5 @@ tabs.forEach(tab => {
 // 启动
 initSettings();
 initGenerate();
+// Task 23 / FR-33：绑定内联编辑事件 → 上报 user_edit 触发后端避让
+initEditor();
