@@ -309,3 +309,51 @@
   - `rule` TR-20.1: `POST /plugin/reload` 指定 `tg-validator` 新 bundle 后，10 秒内日志可见 `plugin reloaded: tg-validator`
   - `rule` TR-20.2: 重载后再次 `/generate` 用相同输入，结果或显式版本号发生可观察变化
 - **Notes**: v1 仅手动实验；自动学习闭环不在本次范围
+
+## Task 21: 动态优化引擎（tg-monitor + 注入/替换 + WebSocket 推送）
+- **Status**: `pending`
+- **Priority**: medium
+- **Depends On**: Task 15, Task 16
+- **Description**:
+  - 新增 `tg-monitor` Cordis 插件（并入 `tg-bundle`）：
+    - 周期性拉取目的地天气（默认 Open-Meteo 免费 API；和风/QWeather 可选，配置走 `server/.env`）。
+    - 周期性调 `tg-scraper` 抓"目的地+今日/明日"维度的同城热榜（演出/市集/展览/限时活动），结果带 `source_url` 与时间戳。
+    - 监测频率可配：默认每小时 1 次；出行前 24h 自动加密到每 30 分钟。
+  - 当地特色素材库：在 `server/plugins/tg-bundle/data/seasonal.yaml` 维护季节/地域特色条目（如"呼伦贝尔 7 月那达慕""济南 8 月荷花节""哈尔滨 1 月冰雪大世界"），生成行程时按出行日期匹配注入对应日期卡片；条目可由 LLM + 规则混合生成并经 `tg-validator` 校对后入库。
+  - `tg-optimizer` 扩展：监测数据触发阈值时产出结构化 diff（`ADD`/`SWAP`/`MOVE`），交 `tg-validator` 二次校对，结果通过 WebSocket `/ws/plan/{plan_id}` 推送到前端。
+  - 后端 `routes.py` 新增 WebSocket 端点 `/ws/plan/{plan_id}`：维护订阅者列表，diff 推送时附带 `{version_id, trigger_reason, diff, source_url, explanation}`。
+  - 前端 `renderer.js` 扩展：
+    - 监听 WebSocket，收到 diff 后按 `ADD`/`SWAP`/`MOVE` 原子更新对应日期卡片 DOM，以高亮动画呈现"换出/换入"。
+    - 变更说明浮层：在变更卡片上方展示可读说明（如"明日济南有雷阵雨，已将千佛山 → 山东省博物馆"）。
+    - 顶部"动态更新 N 次"徽章 + changelog 抽屉（时间/触发原因/变更类型/采纳状态）。
+    - "撤销"按钮：调 `POST /plan/{plan_id}/revert/{version_id}` 回滚到任意历史版本。
+  - 后端版本快照：`POST /generate` 与每次动态变更都生成 `plan_version` 快照（`version_id` + 时间戳 + 触发原因 + diff），存 SQLite `plan_versions` 表。
+  - 协同冲突解决（FR-33）：若用户在最近 5 分钟内手动编辑过某卡片（前端通过 WebSocket 上报 `user_edit` 事件），动态优化跳过该卡片仅推送提示。
+  - 设置面板扩展：新增"动态更新"总开关 + 频率上限 + 元素类型白名单 + 自动应用模式（建议/自动）。
+- **Acceptance Criteria Addressed**: AC-14, FR-27~29, FR-31~33, NFR-11
+- **Test Requirements**:
+  - `rule` TR-21.1: 模拟出行日大雨 + 同城室内展览事件，`tg-monitor` 在 1 个监测周期内产出 diff 并推送 WebSocket
+  - `rule` TR-21.2: 前端收到 diff 后 DOM 高亮换出/换入可见，说明文案非空，`source_url` 非空
+  - `rule` TR-21.3: 点击"撤销"在 1 秒内回滚到上一版本，徽章计数不变（保留历史）
+  - `rule` TR-21.4: 关闭"动态更新"开关后，前端不再接收 WebSocket diff
+- **Notes**: v1 默认"建议模式"（diff 推送后用户点"采纳"才应用）；"自动应用模式"为可选开关
+
+## Task 22: DSH Web UI 驾驶舱联调（人机协同）
+- **Status**: `pending`
+- **Priority**: medium
+- **Depends On**: Task 21
+- **Description**:
+  - 后端启动脚本 `server/run.sh` 增加 `dsh web` 启动（默认 `127.0.0.1:3080`），与 FastAPI 同进程或同 supervisor 下并行。
+  - 在 DSH Web UI 中暴露三类自定义视图（通过 DSH 的视图扩展点或 iframe 嵌入）：
+    1. **思考轨迹**：从 Trajectory 日志读取并按时间线渲染（复用 Task 19 的 `/trajectory` 接口）。
+    2. **动态变更建议列表**：列出 `tg-optimizer` 待推送的 diff，每条带"采纳/驳回/编辑"按钮。
+    3. **阈值配置面板**：监测频率、元素类型白名单、自动应用模式等（与前端设置面板共享 `tg_config`）。
+  - 双向同步：用户在 Web UI 内点"采纳/驳回"后，通过 WebSocket 反向同步到前端行程（≤ 1 秒内更新 DOM）；"编辑"建议则调 `POST /plan/{plan_id}/edit-suggestion` 修改 diff 后再采纳。
+  - README 写明驾驶舱访问方式、本机访问默认无鉴权、远程访问需叠加反代 + 鉴权。
+  - 与前端行程视图的状态对齐：两边共享同一 `plan_id` 与 `version_id`，避免出现"驾驶舱已采纳但前端未更新"或反之。
+- **Acceptance Criteria Addressed**: AC-15, FR-30, NFR-12
+- **Test Requirements**:
+  - `rule` TR-22.1: 浏览器打开 `http://127.0.0.1:3080` 可见思考轨迹、动态变更建议列表、阈值配置面板三类视图
+  - `rule` TR-22.2: 在 Web UI 点"采纳"某条建议后，前端行程在 ≤ 1 秒内同步更新；点"驳回"则该建议不推送至前端
+  - `rule` TR-22.3: 在 Web UI 编辑某条建议的 diff 后采纳，前端按编辑后版本更新
+- **Notes**: 若 DSH 视图扩展点不足，回退用 iframe 嵌入前端调试视图 + 后端控制面板组合实现
