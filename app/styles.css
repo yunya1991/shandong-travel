@@ -469,6 +469,10 @@ strong { color: var(--accent); font-weight: 600; }
 .badge--backend { background: var(--page-brand); color: #fff; }
 .badge--degraded { background: var(--warning); color: #fff; }
 .badge--sources { background: var(--page-surface-muted); color: var(--page-text-secondary); }
+.badge--cache {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--success) 100%);
+  color: #fff;
+}
 
 .warnings-callout {
   width: 100%;

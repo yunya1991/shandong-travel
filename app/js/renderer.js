@@ -101,10 +101,14 @@ function renderWarningsBanner(result) {
   const badge = backendUsed
     ? `<span class="badge badge--backend">后端增强模式 · session: ${escapeHtml(sessionId.slice(0, 20))}</span>`
     : (degraded ? `<span class="badge badge--degraded">已降级为纯前端模式</span>` : '');
+  const cachedBadge = result.cached
+    ? `<span class="badge badge--cache" title="相同目的地方案已命中后端缓存，未触发抓取/LLM">⚡ 缓存命中</span>`
+    : '';
 
   return `
   <aside class="guide-banner">
     ${badge}
+    ${cachedBadge}
     ${sources.length ? `<span class="badge badge--sources">来源 ${sources.length} 条</span>` : ''}
     ${warnings.length ? `
       <details class="warnings-callout">

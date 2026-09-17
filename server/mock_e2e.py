@@ -121,6 +121,8 @@ MOCK_WARNINGS = [
 
 # session_id -> events
 _TRAJECTORIES: dict[str, list] = {}
+# destination -> session_id（用于模拟 plan-level 缓存命中）
+_PLAN_CACHE: dict[str, str] = {}
 
 
 def _make_trajectory_events(session_id: str) -> list:
@@ -185,8 +187,29 @@ class MockHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = parse_url(self.path).path
         if path == "/generate":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                payload = {}
+            destination = (payload.get("destination") or "").strip()
+            # 模拟 plan-level 缓存命中（TR-16.1）：相同 destination 第二次直接复用
+            cached_sid = _PLAN_CACHE.get(destination) if destination else None
+            if cached_sid and cached_sid in _TRAJECTORIES:
+                body = json.dumps({
+                    "plan": MOCK_PLAN,
+                    "sources": MOCK_SOURCES,
+                    "warnings": MOCK_WARNINGS,
+                    "session_id": cached_sid,
+                    "source_coverage": {"total": 6, "with_url": 6},
+                    "cached": True,
+                }, ensure_ascii=False).encode()
+                self._send_json(200, body)
+                return
             session_id = f"sess_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
             _TRAJECTORIES[session_id] = _make_trajectory_events(session_id)
+            if destination:
+                _PLAN_CACHE[destination] = session_id
             body = json.dumps({
                 "plan": MOCK_PLAN,
                 "sources": MOCK_SOURCES,
