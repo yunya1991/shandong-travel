@@ -19,13 +19,27 @@ const DEFAULT_CONFIG = {
 };
 
 export function loadConfig() {
+  let cfg;
   try {
     const raw = localStorage.getItem(CONFIG_KEY);
-    if (!raw) return { ...DEFAULT_CONFIG };
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    cfg = raw ? { ...DEFAULT_CONFIG, ...JSON.parse(raw) } : { ...DEFAULT_CONFIG };
   } catch {
-    return { ...DEFAULT_CONFIG };
+    cfg = { ...DEFAULT_CONFIG };
   }
+  // 云端同源部署自动适配（Task 23+ 部署增强）：
+  // 若 backend_url 指向 localhost 但当前页面 origin 不是 localhost，
+  // 自动改用当前 origin，让前端直连同源后端，无需用户手动改设置。
+  // 同时默认切到 backend 模式 + 开启动态优化，开箱即用。
+  try {
+    const origin = window.location.origin || '';
+    const isLocalhost = origin.includes('localhost') || origin.includes('127.0.0.1');
+    if (!isLocalhost && cfg.backend_url && cfg.backend_url.includes('localhost')) {
+      cfg.backend_url = origin;
+      cfg.mode = 'backend';
+      cfg.dynamic_enabled = true;
+    }
+  } catch { /* window 可能在非浏览器环境 */ }
+  return cfg;
 }
 
 export function saveConfig(config) {

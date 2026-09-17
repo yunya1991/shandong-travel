@@ -1,0 +1,39 @@
+# Render Blueprint · 一键部署配置（Task 23+ 部署增强）
+# 部署链接：
+#   https://render.com/deploy?repo=https://github.com/yunya1991/shandong-travel&branch=trae/agent-AIuofp
+#
+# 免费套餐限制：
+#   - 512MB RAM，15 分钟无流量自动 sleep
+#   - 无持久化磁盘 → SQLite 重启丢失（如需持久化升级套餐挂载 Disk 设 TG_DB_PATH）
+services:
+  - type: web
+    name: shandong-travel
+    runtime: docker
+    plan: free
+    branch: trae/agent-AIuofp
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # LLM API Key（部署后在 Render 控制台填入真实值，避免提交到 git）
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        value: https://api.deepseek.com
+      - key: LLM_MODEL
+        value: deepseek-chat
+      # 云端部署：单进程，cockpit 关闭
+      - key: COCKPIT_DISABLE
+        value: "1"
+      - key: TG_STATIC_DIR
+        value: /app/static
+      - key: TG_DB_PATH
+        value: /data/cache.db
+      # 动态优化引擎默认建议模式（云端 cockpit 关闭，建议改 auto）
+      - key: TG_DYNAMIC_ENABLED
+        value: "true"
+      - key: TG_DYNAMIC_MODE
+        value: auto
+      # 前端能直连后端，CORS 放开
+      - key: FRONTEND_ORIGIN
+        value: "*"

@@ -5,13 +5,14 @@
 """
 from __future__ import annotations
 import json
+import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-DB_PATH = Path(__file__).resolve().parent.parent / "cache.db"
+DB_PATH = Path(os.environ.get("TG_DB_PATH") or (Path(__file__).resolve().parent.parent / "cache.db"))
 
 
 def _conn() -> sqlite3.Connection:
