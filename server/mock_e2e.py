@@ -14,6 +14,8 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse as parse_url
+import asyncio
+import threading
 
 # ====== 固定 mock 数据 ======
 MOCK_PLAN = {
@@ -124,6 +126,127 @@ _TRAJECTORIES: dict[str, list] = {}
 # destination -> session_id（用于模拟 plan-level 缓存命中）
 _PLAN_CACHE: dict[str, str] = {}
 
+# plan_id -> [{version_id, plan, trigger_reason, diff, adopted, ts}]（模拟版本快照）
+_PLAN_VERSIONS: dict[str, list] = {}
+# plan_id -> [websocket handler 回调]（用于 mock 主动推送 diff）
+_WS_SUBSCRIBERS: dict[str, list] = {}
+
+# 模拟一次 monitor 周期产出的固定 diff（FR-29 / AC-14）
+MOCK_MONITOR_DIFF = [
+    {
+        "op": "SWAP",
+        "day": 3,
+        "target_field": "attractions",
+        "old_item": {"name": "山东博物馆"},
+        "new_item": {
+            "name": "济南市博物馆",
+            "desc": "雷阵雨室内备选：济南市博物馆，免费开放，含济南历史陈列",
+            "duration": "2h",
+            "ticket": "免费",
+            "tags": ["博物馆", "室内"],
+            "image_query": "Jinan Museum",
+            "source_url": "https://example.com/jinan-museum",
+            "source_type": "generic",
+            "source_title": "济南市博物馆官方页",
+        },
+        "reason": "明日济南有雷阵雨（降水概率 80%），将山东博物馆 → 济南市博物馆（室内备选）",
+    }
+]
+MOCK_MONITOR_DATA = {
+    "ts": None,  # 运行时填
+    "destination": "济南",
+    "weather": {"days": [{"date": "2026-10-03", "is_rain": True, "precip_prob": 80,
+                          "weather_code": 61, "tmax": 22, "tmin": 16}]},
+    "hotlist_count": 1,
+    "hotlist": [{"name": "济南市博物馆", "source_url": "https://example.com/jinan-museum"}],
+}
+
+
+def _new_version_id() -> str:
+    return f"v_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}"
+
+
+def _save_version(plan_id: str, plan: dict, *, trigger_reason: str,
+                  diff: list = None, adopted: bool = True) -> str:
+    """保存版本快照（mock 版，模拟 plan_store.save_version）。"""
+    versions = _PLAN_VERSIONS.setdefault(plan_id, [])
+    if adopted:
+        for v in versions:
+            v["adopted"] = False
+    vid = _new_version_id()
+    versions.append({
+        "version_id": vid, "plan_id": plan_id,
+        "ts": time.time(), "trigger_reason": trigger_reason,
+        "diff": diff or [], "plan": plan, "adopted": adopted,
+    })
+    return vid
+
+
+def _latest_version(plan_id: str) -> dict | None:
+    versions = _PLAN_VERSIONS.get(plan_id, [])
+    for v in reversed(versions):
+        if v.get("adopted"):
+            return v
+    return versions[-1] if versions else None
+
+
+def _broadcast_ws(plan_id: str, msg: dict) -> None:
+    """模拟 WebSocket 推送。
+
+    BaseHTTPRequestHandler 不原生支持 WebSocket，
+    这里仅记录日志并保留订阅者占位（前端通过 triggerOptimize 主动拉取）。
+    """
+    subs = _WS_SUBSCRIBERS.get(plan_id, [])
+    print(f"[mock_ws] plan_id={plan_id} subs={len(subs)} msg.type={msg.get('type')}")
+    # 若有真实订阅者回调（如未来扩展为 long-poll / SSE），逐个调用
+    for cb in subs:
+        try:
+            cb(msg)
+        except Exception as e:
+            print(f"[mock_ws] callback error: {e}")
+
+
+def _apply_diff_mock(plan: dict, diff: list) -> dict:
+    """简化 apply_diff，仅处理 SWAP/ADD/MOVE on daily[*].attractions/food。"""
+    import copy
+    new_plan = copy.deepcopy(plan)
+    daily = new_plan.get("daily", []) or []
+    for op in diff:
+        try:
+            day_idx = int(op.get("day", 0))
+            field = op.get("target_field")
+            if day_idx <= 0 or field not in ("attractions", "food"):
+                continue
+            day = next((d for d in daily if d.get("day") == day_idx), None)
+            if not day:
+                continue
+            items = day.setdefault(field, [])
+            new_item = op.get("new_item") or {}
+            old_item = op.get("old_item") or {}
+            opk = (op.get("op") or "").upper()
+            if opk == "ADD" and new_item:
+                items.append(new_item)
+            elif opk == "SWAP" and new_item:
+                target_name = old_item.get("name")
+                replaced = False
+                for i, it in enumerate(items):
+                    if isinstance(it, dict) and it.get("name") == target_name:
+                        items[i] = new_item
+                        replaced = True
+                        break
+                if not replaced:
+                    items.append(new_item)
+            elif opk == "MOVE" and old_item:
+                target_name = old_item.get("name")
+                idx = next((i for i, it in enumerate(items)
+                           if isinstance(it, dict) and it.get("name") == target_name), -1)
+                if idx >= 0 and new_item:
+                    items.pop(idx)
+                    items.append(new_item)
+        except Exception:
+            continue
+    return new_plan
+
 
 def _make_trajectory_events(session_id: str) -> list:
     base_ts = time.time()
@@ -208,11 +331,28 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send_json(200, body)
             return
         # /trajectory/{session_id}
-        if path.startswith("/trajectory/"):
+        if path.startswith("/trajectory/") and not path.startswith("/trajectory/replay/"):
             sid = path.rsplit("/", 1)[-1]
             events = _TRAJECTORIES.get(sid, [])
             body = json.dumps({"session_id": sid, "events": events, "count": len(events)},
                               ensure_ascii=False).encode()
+            self._send_json(200, body)
+            return
+        # /plan/{plan_id}/versions
+        if path.startswith("/plan/") and path.endswith("/versions"):
+            parts = path.split("/")
+            plan_id = parts[2] if len(parts) > 2 else ""
+            versions = _PLAN_VERSIONS.get(plan_id, [])
+            body = json.dumps({
+                "plan_id": plan_id,
+                "versions": [{
+                    "version_id": v["version_id"],
+                    "plan_id": v["plan_id"],
+                    "ts": v["ts"],
+                    "trigger_reason": v["trigger_reason"],
+                    "adopted": v["adopted"],
+                } for v in versions],
+            }, ensure_ascii=False).encode()
             self._send_json(200, body)
             return
         self._send_json(404, json.dumps({"error": "not found"}).encode())
@@ -226,9 +366,12 @@ class MockHandler(BaseHTTPRequestHandler):
             except Exception:
                 payload = {}
             destination = (payload.get("destination") or "").strip()
+            plan_id = payload.get("plan_id") or f"plan_{int(time.time()*1000)}"
             # 模拟 plan-level 缓存命中（TR-16.1）：相同 destination 第二次直接复用
             cached_sid = _PLAN_CACHE.get(destination) if destination else None
             if cached_sid and cached_sid in _TRAJECTORIES:
+                # 缓存命中也写一份版本快照便于演示
+                vid = _save_version(plan_id, MOCK_PLAN, trigger_reason="initial_generate")
                 body = json.dumps({
                     "plan": MOCK_PLAN,
                     "sources": MOCK_SOURCES,
@@ -236,6 +379,8 @@ class MockHandler(BaseHTTPRequestHandler):
                     "session_id": cached_sid,
                     "source_coverage": {"total": 6, "with_url": 6},
                     "cached": True,
+                    "plan_id": plan_id,
+                    "version_id": vid,
                 }, ensure_ascii=False).encode()
                 self._send_json(200, body)
                 return
@@ -243,12 +388,71 @@ class MockHandler(BaseHTTPRequestHandler):
             _TRAJECTORIES[session_id] = _make_trajectory_events(session_id)
             if destination:
                 _PLAN_CACHE[destination] = session_id
+            # 写入初始版本快照（Task 21 / FR-32）
+            vid = _save_version(plan_id, MOCK_PLAN, trigger_reason="initial_generate")
             body = json.dumps({
                 "plan": MOCK_PLAN,
                 "sources": MOCK_SOURCES,
                 "warnings": MOCK_WARNINGS,
                 "session_id": session_id,
                 "source_coverage": {"total": 6, "with_url": 6},
+                "plan_id": plan_id,
+                "version_id": vid,
+            }, ensure_ascii=False).encode()
+            self._send_json(200, body)
+            return
+        # /plan/{plan_id}/optimize
+        if path.startswith("/plan/") and path.endswith("/optimize"):
+            parts = path.split("/")
+            plan_id = parts[2] if len(parts) > 2 else ""
+            cur = _latest_version(plan_id)
+            if not cur:
+                self._send_json(404, json.dumps({"error": "plan not found"}).encode())
+                return
+            # 应用固定 mock diff
+            new_plan = _apply_diff_mock(cur["plan"], MOCK_MONITOR_DIFF)
+            new_vid = _save_version(plan_id, new_plan,
+                                     trigger_reason="monitor_optimize",
+                                     diff=MOCK_MONITOR_DIFF)
+            # 推送 diff 给 WebSocket 订阅者（模拟即时推送）
+            ws_msg = {
+                "type": "optimize_diff",
+                "plan_id": plan_id,
+                "diff": MOCK_MONITOR_DIFF,
+                "new_version_id": new_vid,
+                "applied_count": len(MOCK_MONITOR_DIFF),
+                "reason": "monitor_optimize",
+                "source_url": MOCK_MONITOR_DIFF[0]["new_item"].get("source_url"),
+                "explanation": MOCK_MONITOR_DIFF[0]["reason"],
+            }
+            _broadcast_ws(plan_id, ws_msg)
+            body = json.dumps({
+                "plan_id": plan_id,
+                "new_version_id": new_vid,
+                "diff": MOCK_MONITOR_DIFF,
+                "applied_count": len(MOCK_MONITOR_DIFF),
+                "plan": new_plan,
+            }, ensure_ascii=False).encode()
+            self._send_json(200, body)
+            return
+        # /plan/{plan_id}/revert/{version_id}
+        if path.startswith("/plan/") and "/revert/" in path:
+            parts = path.split("/")
+            plan_id = parts[2] if len(parts) > 2 else ""
+            target_vid = parts[4] if len(parts) > 4 else ""
+            target = next((v for v in _PLAN_VERSIONS.get(plan_id, [])
+                          if v["version_id"] == target_vid), None)
+            if not target:
+                self._send_json(404, json.dumps({"error": "version not found"}).encode())
+                return
+            new_vid = _save_version(plan_id, target["plan"],
+                                     trigger_reason=f"revert_to_{target_vid}",
+                                     diff=[{"op": "REVERT", "target_version": target_vid}])
+            body = json.dumps({
+                "plan_id": plan_id,
+                "new_version_id": new_vid,
+                "plan": target["plan"],
+                "reverted_from": target_vid,
             }, ensure_ascii=False).encode()
             self._send_json(200, body)
             return

@@ -235,3 +235,54 @@ export async function replayTrajectory(sessionId) {
   if (!res.ok) throw new Error(`replay HTTP ${res.status}`);
   return res.json();
 }
+
+/**
+ * 手动触发一次动态优化（Task 21 / AC-14 / FR-29）
+ * 模拟 tg-monitor 检测到触发条件 → tg-optimizer 产出 diff → 应用并返回新版本
+ * 真实后端会用 WebSocket 推送；mock 模式直接返回 diff
+ */
+export async function triggerOptimize(planId, destination, { departure_date, whitelist } = {}) {
+  const config = loadConfig();
+  if (!config.backend_url) throw new Error('需配置后端地址');
+  const res = await fetch(`${config.backend_url.replace(/\/$/, '')}/plan/${encodeURIComponent(planId)}/optimize`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-LLM-Config': JSON.stringify({
+        base_url: config.base_url,
+        api_key: config.api_key,
+        model: config.model,
+      }),
+    },
+    body: JSON.stringify({ destination, departure_date, whitelist }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`optimize HTTP ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+/**
+ * 拉取 plan 的版本列表（Task 21 / FR-32）
+ */
+export async function fetchVersions(planId) {
+  const config = loadConfig();
+  if (!config.backend_url) throw new Error('需配置后端地址');
+  const res = await fetch(`${config.backend_url.replace(/\/$/, '')}/plan/${encodeURIComponent(planId)}/versions`);
+  if (!res.ok) throw new Error(`versions HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
+ * 回滚到指定版本（Task 21 / FR-32 / TR-21.3）
+ */
+export async function revertToVersion(planId, versionId) {
+  const config = loadConfig();
+  if (!config.backend_url) throw new Error('需配置后端地址');
+  const res = await fetch(`${config.backend_url.replace(/\/$/, '')}/plan/${encodeURIComponent(planId)}/revert/${encodeURIComponent(versionId)}`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error(`revert HTTP ${res.status}`);
+  return res.json();
+}

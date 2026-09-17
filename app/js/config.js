@@ -8,7 +8,11 @@ const DEFAULT_CONFIG = {
   // 后端增强模式（Task 16 / AC-9, AC-11）
   mode: 'frontend',           // 'frontend' | 'backend'
   backend_url: 'http://localhost:8000',
-  backend_timeout_ms: 5000   // 后端不可达时降级阈值
+  backend_timeout_ms: 5000,  // 后端不可达时降级阈值
+  // 动态优化引擎（Task 21 / AC-14, FR-27~29, FR-31~33）
+  dynamic_enabled: false,    // 总开关
+  dynamic_mode: 'suggest',   // 'suggest'（建议模式，需手动采纳）| 'auto'（自动应用，可撤销）
+  dynamic_whitelist: ['attractions', 'food'],  // 允许动态替换的卡片类型
 };
 
 export function loadConfig() {
@@ -78,6 +82,33 @@ function renderSettings(container) {
       </div>
     </div>
     <div class="settings-section">
+      <h3>动态优化引擎（Task 21 / AC-14）</h3>
+      <p style="color:var(--page-text-muted);font-size:0.85rem;margin-bottom:var(--space-4);">
+        启用后，后端 <code>tg-monitor</code> 周期拉取目的地天气/同城热榜，触发阈值时产出 <code>ADD/SWAP/MOVE</code> diff，通过 WebSocket 推送，前端高亮"换出/换入"并附变更说明。可一键撤销回到任意历史版本。
+      </p>
+      <div class="form-group">
+        <label class="form-label">
+          <input type="checkbox" id="cfg-dyn-enabled" ${cfg.dynamic_enabled ? 'checked' : ''}>
+          启用动态更新总开关
+        </label>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="cfg-dyn-mode">应用模式</label>
+        <select class="form-select" id="cfg-dyn-mode">
+          <option value="suggest" ${cfg.dynamic_mode === 'suggest' ? 'selected' : ''}>建议模式（推送后需手动点"采纳"才应用）</option>
+          <option value="auto" ${cfg.dynamic_mode === 'auto' ? 'selected' : ''}>自动应用模式（直接应用，可撤销）</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">允许动态替换的元素类型（白名单）</label>
+        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;">
+          <label><input type="checkbox" class="cfg-dyn-wl" value="attractions" ${cfg.dynamic_whitelist.includes('attractions') ? 'checked' : ''}> 景点</label>
+          <label><input type="checkbox" class="cfg-dyn-wl" value="food" ${cfg.dynamic_whitelist.includes('food') ? 'checked' : ''}> 美食</label>
+          <label><input type="checkbox" class="cfg-dyn-wl" value="accommodation" ${cfg.dynamic_whitelist.includes('accommodation') ? 'checked' : ''}> 住宿</label>
+        </div>
+      </div>
+    </div>
+    <div class="settings-section">
       <h3>使用说明</h3>
       <ul style="padding-left:1.2em;color:var(--page-text-secondary);font-size:0.9rem;line-height:1.8;">
         <li>在「生成手册」页输入目的地与偏好，点击生成</li>
@@ -90,6 +121,7 @@ function renderSettings(container) {
   `;
 
   container.querySelector('#cfg-save').addEventListener('click', () => {
+    const whitelist = Array.from(container.querySelectorAll('.cfg-dyn-wl:checked')).map(cb => cb.value);
     const config = {
       ...loadConfig(),
       base_url: container.querySelector('#cfg-base').value.trim(),
@@ -97,7 +129,10 @@ function renderSettings(container) {
       api_key: container.querySelector('#cfg-key').value.trim(),
       mode: container.querySelector('#cfg-mode').value,
       backend_url: container.querySelector('#cfg-backend').value.trim(),
-      backend_timeout_ms: parseInt(container.querySelector('#cfg-timeout').value, 10) || 5000
+      backend_timeout_ms: parseInt(container.querySelector('#cfg-timeout').value, 10) || 5000,
+      dynamic_enabled: container.querySelector('#cfg-dyn-enabled').checked,
+      dynamic_mode: container.querySelector('#cfg-dyn-mode').value,
+      dynamic_whitelist: whitelist,
     };
     saveConfig(config);
     const result = container.querySelector('#cfg-test-result');

@@ -691,3 +691,201 @@ strong { color: var(--accent); font-weight: 600; }
   .warning-item__msg { grid-column: 1 / -1; }
   .timeline-item__head { flex-direction: column; gap: 2px; }
 }
+
+/* === 动态优化引擎（Task 21 / AC-14 / FR-27~29, FR-31~33） === */
+.dyn-controls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-left: auto;
+}
+.badge--dyn {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(184, 85, 29, 0.15);
+}
+.btn--sm {
+  padding: 2px 10px;
+  font-size: 0.78rem;
+  border-radius: var(--radius-pill);
+}
+
+/* changelog 抽屉 */
+.dyn-changelog {
+  background: var(--page-bg);
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  font-size: 0.78rem;
+}
+.dyn-changelog summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--page-brand-text);
+}
+.dyn-changelog__list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 320px;
+  max-width: 480px;
+}
+.dyn-changelog__item {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 4px var(--space-2);
+  font-size: 0.74rem;
+  padding: var(--space-2);
+  background: var(--page-surface);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--accent);
+}
+.dyn-changelog__time {
+  font-family: monospace;
+  color: var(--page-text-muted);
+}
+.dyn-changelog__op {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #fff;
+  text-align: center;
+}
+.dyn-changelog__op--add { background: var(--success); }
+.dyn-changelog__op--swap { background: var(--warning); }
+.dyn-changelog__op--move { background: var(--info); }
+.dyn-changelog__reason {
+  grid-column: 1 / -1;
+  color: var(--page-text-secondary);
+  font-style: italic;
+}
+.dyn-changelog__adopted {
+  grid-column: 1 / -1;
+  font-size: 0.7rem;
+  color: var(--success);
+}
+
+/* 换出/换入动画 */
+.attraction-item.dyn-swap-out {
+  animation: dynSwapOut 1s ease forwards;
+}
+.attraction-item.dyn-swap-in {
+  animation: dynSwapIn 2s ease;
+  box-shadow: 0 0 0 3px rgba(217, 119, 87, 0.55);
+}
+@keyframes dynSwapOut {
+  0% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(0.92); opacity: 0.35; filter: grayscale(60%); }
+}
+@keyframes dynSwapIn {
+  0% { transform: scale(0.92); box-shadow: 0 0 0 0 rgba(217, 119, 87, 0); }
+  20% { transform: scale(1.02); box-shadow: 0 0 0 4px rgba(217, 119, 87, 0.6); }
+  100% { transform: scale(1); box-shadow: 0 0 0 3px rgba(217, 119, 87, 0); }
+}
+
+/* 变更说明浮层（FR-29） */
+.dyn-change-note {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(184, 85, 29, 0.95);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  font-size: 0.74rem;
+  white-space: nowrap;
+  z-index: 5;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  animation: dynNoteIn 0.3s ease;
+}
+.dyn-change-note__icon {
+  margin-right: 4px;
+}
+.attraction-item {
+  position: relative;
+}
+@keyframes dynNoteIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* 建议模式确认对话框（FR-31） */
+.dyn-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+.dyn-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+.dyn-modal__dialog {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--page-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5);
+  max-width: 540px;
+  width: 92vw;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+}
+.dyn-modal__dialog h3 {
+  margin: 0 0 var(--space-2);
+  color: var(--page-brand-text);
+}
+.dyn-modal__dialog p {
+  margin: 0 0 var(--space-3);
+  font-size: 0.85rem;
+  color: var(--page-text-secondary);
+}
+.dyn-modal__list {
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.dyn-modal__list li {
+  padding: var(--space-2) var(--space-3);
+  background: var(--page-brand-soft);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+}
+.dyn-suggest-reason {
+  color: var(--page-text-muted);
+  font-style: italic;
+  font-size: 0.78rem;
+}
+
+/* 顶部 toast */
+.dyn-toast {
+  position: fixed;
+  top: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%) translateY(-20px);
+  background: var(--page-surface);
+  color: var(--page-text);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
+  font-size: 0.85rem;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  z-index: 1100;
+  opacity: 0;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+.dyn-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}

@@ -3,6 +3,7 @@ import { getCurrentPlan, getCurrentResult } from './generate.js';
 import { escapeHtml } from './config.js';
 import { fetchImages } from './images.js';
 import { getFavorites, toggleFavorite } from './tools/favorites.js';
+import * as optimizer from './optimizer.js';
 
 /**
  * 渲染当前方案到手册视图
@@ -26,6 +27,11 @@ export async function renderCurrent() {
 
   // 异步加载图片，加载完成后更新 DOM
   loadImagesAsync(plan, container);
+
+  // 挂载动态优化控件（Task 21 / AC-14 / FR-27~29, FR-31~33）
+  if (optimizer.isDynamicEnabled()) {
+    optimizer.mountDynamicControls();
+  }
 }
 
 async function loadImagesAsync(plan, container) {
